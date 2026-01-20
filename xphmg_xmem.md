@@ -2,8 +2,8 @@
 **Unified LDS / Cache / Streaming Memory Control**
 
 **Category:** Vendor Extension (part of `XPHMG_*` family)  
-**Version:** 0.1.0
-**Author:** Pedro H. M. Garcia  
+**Version:** 0.1.1
+**Author:** Pedro H. M. Garcia
 **License:** CC-BY-SA 4.0 (open specification)
 
 ---
@@ -31,7 +31,7 @@
 
 - CAP defines the authoritative CSRs, feature bits, defaults, and visibility scopes consumed by XMEM instructions and descriptors.
 - RSV/MTX/RT/GFX/ACCEL reuse XMEM for LDS allocation, cache/streaming hints, SVMEM gather/scatter, and class/domain selection; no extension redefines XMEM fields.
-- PREC supplies element width and predication context for SVMEM (e.g., `EFF_EW`, `ZMODE`); XMEM gather/scatter honors these controls.
+- PREC supplies element width and masked writeback policy used by XMEM-controlled memory ops (e.g., `EFF_EW`, `ZMODE`). Predicate state itself is owned by `XPHMG_PMASK` and is consumed by XMEM as *effective predication*.
 - XDL provides layout metadata used by multiple engines; tiers describe placement/latency, not layout.
 
 ### 1.4 Undefined or Reserved Behavior
@@ -75,8 +75,9 @@ This section defines shared terms aligned with RISC-V specification style.
 ### 2.4 SVMEM Terminology
 
 - **SVMEM**: indexed gather/scatter configured by `CAP.XMEM.SVMBASE/SVMIDX/SVMSCL/SVMLEN/SVMMODE`.
-- **FOF**: fault-only-first via `SVMSCL.FOF`; first faulting element index written to `RSV.SVFAULTI`, operation aborts.
-- **ZMODE**: masked-lane policy from `CAP.PREC.MODE.ZMODE`, applied to gathers/scatters.
+- **FOF**: fault-only-first via `SVMSCL.FOF`; on the first faulting element *among predicate-true lanes*, the implementation MUST report that element index via an architecturally visible mechanism (sink defined by the consuming ISA domain) and MUST abort the operation (no later elements issue).
+- **Predication (effective)**: the predicate consumed by XMEM-controlled operations is the selected `PMASK.bank[pbank]` as defined by `XPHMG_PMASK` (see §5.0).
+- **ZMODE**: masked writeback policy from `CAP.PREC.MODE.ZMODE` (merge vs zero), applied uniformly to predicated loads/gathers.
 
 ### 2.5 Configuration Sources
 
@@ -358,6 +359,20 @@ struct XPHMG_MEMCTL {
 
 This section describes how XMEM-controlled behavior is applied during execution. It relies on CAP state and the scope/dom/class model in Sections 2-4.
 
+### 5.0 Predication Integration (Normative)
+
+`XPHMG_XMEM` does not define predicate state.
+If predication is implemented for any XMEM-controlled operation, the following requirements apply:
+
+1. **Canonical source:** PMASK is the **only** architectural source of predication for XMEM. XMEM MUST NOT treat RSV-local masks, engine-local wave masks, or any other extension-local state as normative predicate sources.
+2. **Effective predication selection:** The effective predicate for an operation is `PMASK.bank[pbank]`, where `pbank` is selected by the consuming instruction (via a field in its encoding) or by an enable/prefix mechanism defined by that consuming ISA domain. If no `pbank` is selected, `pbank=0` is implied.
+3. **Default unmasked execution:** `pbank=0` MUST behave as a virtual ALL-ONES predicate (bank0), such that predicated XMEM operations execute as unmasked when `pbank=0`.
+4. **No memory side-effects for masked lanes:** For any memory-touching operation controlled by XMEM (loads, stores, atomics, and SVMEM gather/scatter), predicate-false lanes/elements MUST NOT issue memory accesses and MUST NOT produce memory side-effects.
+5. **Writeback policy:** For predicated memory operations that write architecturally visible register/vector destinations (e.g., loads and gathers), predicate-false elements MUST follow `CAP.PREC.MODE.ZMODE`:
+   - `ZMODE=0` (**merge**): preserve the prior destination element.
+   - `ZMODE=1` (**zero**): write architectural zero to the destination element.
+   Stores/scatters/atomics have no destination writeback; masked-off elements are simply suppressed (Rule 4).
+
 ### 5.1 SVMEM Gather/Scatter Semantics
 
 SVMEM defines indexed loads/stores governed by CAP and optional descriptor overrides, shared across all engines issuing indexed operations.
@@ -368,13 +383,14 @@ SVMEM defines indexed loads/stores governed by CAP and optional descriptor overr
 - Element size: if `SVMLEN=0`, use `CAP.PREC.STAT.EFF_EW`; else `SVMLEN`.
 - Scale & sign: `SVMSCL.SCALE` in {1,2,4,8,16}; `SVMSCL.SIGNED` selects sign-extend.
 - Gather vs. scatter: `SVMSCL.GS` selects load or store.
-- FOF: if `SVMSCL.FOF=1`, on first faulting element i, write i to `RSV.SVFAULTI` and abort.
+- FOF: if `SVMSCL.FOF=1`, on the first faulting element i (among predicate-true lanes), the implementation MUST report i via an architecturally visible mechanism (sink defined by the consuming ISA domain) and MUST abort the operation.
 - Bounds: if `SVMMODE.BOUND_CHECK=1`, apply per element; if `ALLOW_OOB_ZERO=1`, out-of-range elements are zeroed instead of faulting.
 
 #### 5.1.2 Predication and Masked Lanes
 
-- Per-lane requests are enabled by the current RSV mask.
-- Masked lanes follow `CAP.PREC.MODE.ZMODE`: zeroing for gathers; scatters do not store for masked lanes.
+- Per-element requests are enabled by **effective predication** sourced from `PMASK.bank[pbank]` (see §5.0).
+- Predicate-false elements MUST NOT issue memory requests for any SVMEM mode (gather or scatter). Therefore, predicate-false elements cannot generate memory faults.
+- Writeback for predicate-false *gather* destinations MUST follow `CAP.PREC.MODE.ZMODE` (merge vs zero). Scatters have no destination writeback; predicate-false elements do not store.
 
 #### 5.1.3 Address Computation
 ```
@@ -847,7 +863,7 @@ Key normative statements consolidated for reference:
 
 - **N-1 Instruction-boundary latching:** Engines must observe `CAP.XMEM.*` at instruction boundaries; mirrors (if any) must match CAP at that boundary.
 - **N-2 Capability gating:** If a `CAP.XMEM.CAP` bit is clear, requests targeting that feature are ignored; CSRs read as zero and ignore writes (RAZ/WI).
-- **N-3 SVMEM predication/FOF:** Gather/scatter must honor RSV predication and `CAP.PREC.MODE.ZMODE`; with `FOF=1`, write first faulting element index to `RSV.SVFAULTI` and abort the operation.
+- **N-3 Predicated memory ops (PMASK + ZMODE):** If predication is implemented, XMEM-controlled loads/stores/atomics/gather/scatter MUST consume effective predication from `PMASK.bank[pbank]` (default `pbank=0`, virtual ALL-ONES). Predicate-false elements MUST NOT issue memory accesses. Predicated load/gather writeback for predicate-false elements MUST follow `CAP.PREC.MODE.ZMODE` (merge vs zero). If `FOF=1`, the first faulting element index among predicate-true lanes MUST be reported via an architecturally visible mechanism and the operation MUST abort.
 - **N-4 LDS budgets/classes:** Enforce CAP budgets and classes on a best-effort basis; report overflows via `CAP.XMEM.EVENTS`.
 - **N-5 Descriptor precedence:** Descriptor fields override CAP defaults only when non-zero and supported; otherwise CAP defaults apply.
 - **N-6 Cross-domain consistency:** All domains must use the same meanings for `dom`, `mclass`, streaming profiles, compression defaults, and SVMEM semantics defined by CAP.

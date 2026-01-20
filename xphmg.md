@@ -1,8 +1,8 @@
 # RISC-V Vendor Extension Family **XPHMG**
 **Heterogeneous Graphics / Matrix / Ray / Vectors / NPU**
 
-**Version:** 0.1.0  
-**Author:** Pedro H. M. Garcia  
+**Version:** 0.1.1
+**Author:** Pedro H. M. Garcia
 **License:** CC-BY-SA 4.0 (open specification)
 
 ---
@@ -15,6 +15,7 @@ Rather than exposing a fixed graphics pipeline or a driver-managed API, XPHMG pr
 
 * **CAP** - authoritative capability discovery and architectural numeric/memory policy.
 * **XMEM** - explicit control over LDS, cache behavior, streaming, and cross-domain data residency.
+* **PMASK** - Predicate & mask processing (branch, merge, zero, boolean ops)
 * **RSV** - scalar-vector reinterpretation for compact and predictable vectorization.
 * **MTX** - small matrix and tile compute primitives.
 * **RT** - ray and geometry intersection primitives.
@@ -43,7 +44,7 @@ All observable behavior - numeric precision, masking, memory residency, coherenc
 
 * `XPHMG_CAP` exposes precision and memory policy consumed by all domains.
 * `XPHMG_XMEM` provides the architectural memory model (classes, domains, streaming, gather/scatter); all domains use the CAP-sourced XMEM state at decode.
-* `XPHMG_RSV` mask semantics and SVMEM gather/scatter follow `CAP.PREC.MODE.ZMODE` and `CAP.XMEM.SVM*`.
+* Predication uses `XPHMG_PMASK`; masked writeback follows `CAP.PREC.MODE.ZMODE`, and SVMEM gather/scatter follows `CAP.XMEM.SVM*`.
 * `XPHMG_MTX`, `XPHMG_RT`, and `XPHMG_GFX` inherit precision/memory policy; optional descriptor tails embed `XPHMG_MEMCTL` for domain/class/stream hints.
 * `XPHMG_NPU` descriptors reuse CAP precision policy and the XMEM memory model; submission is via CSR doorbells defined in the NPU spec.
 
@@ -188,20 +189,63 @@ This section is informative. It summarizes each XPHMG substrate and its architec
 
 > Instruction encodings and CSR layouts are defined in `XPHMG_XMEM`.
 
-### 3.3 Scalar-Vectors (`XPHMG_RSV` + profiles)
+### 3.3 Predication Model (`XPHMG_PMASK`)
+
+XPHMG defines a unified, banked predication model based on the XPHMG_PMASK extension.
+
+Predication is a transversal architectural concept and applies uniformly to scalar, vector,
+memory, graphics, ray tracing and accelerator extensions.
+
+#### 3.3.1 Canonical Source of Predication
+
+The only architecturally defined source of predication in XPHMG is PMASK.
+All effective predication is sourced from the effective predicate vector:
+
+    pred[i] = PMASK.bank[pbank_eff][i]
+
+where `pbank_eff` is selected by instruction encoding or architectural prefix,
+with `pbank = 0` denoting a virtual ALL-ONES bank.
+
+Alternative predicate sources or implicit masking mechanisms are not defined in XPHMG;
+predicate state is canonically sourced from `XPHMG_PMASK`.
+
+#### 3.3.2 Execution Semantics
+
+Execution semantics for effective predication (including operand suppression, exception
+behavior, and memory side-effects on predicate-false lanes) are defined by `XPHMG_PMASK`
+and consumed from it by all domains.
+
+#### 3.3.3 Writeback Policy
+
+Writeback policy for predicate-false lanes is defined by `CAP.PREC.MODE.ZMODE`:
+
+- merge: predicate-false lanes preserve their previous destination value.
+- zero: predicate-false lanes write zero.
+
+PMASK defines predicate state; CAP defines writeback and numeric policy.
+
+#### 3.3.4 Extension Responsibilities
+
+- PMASK defines predicate storage and bank semantics.
+- CAP defines numeric and writeback policy (including ZMODE) and discovery.
+- XMEM defines memory interaction under effective predication.
+- RSV, GFX, RT and ACCEL consume predication and CAP policy as defined by their respective specifications.
+
+
+### 3.4 Scalar-Vectors (`XPHMG_RSV` + profiles)
 
 **Purpose:** provides a scalar-vector reinterpretation layer over scalar ALU/LSU, sharing CAP precision and XMEM memory policy.
 
 **Invariants (informative):**
 - Masks follow `CAP.PREC.MODE.ZMODE` (merge vs zeroing).
-- Gather/scatter uses `CAP.XMEM.SVM*` defaults; FOF/fault index semantics are defined in RSV.
+- Gather/scatter uses `CAP.XMEM.SVM*` defaults; FOF/fault index reporting sinks are defined by the consuming ISA domain.
 - FP rounding/SAE/ZMODE may be overridden per instruction via RSV controls; defaults revert after the instruction.
 
-**Optional profiles:** `XPHMG_RSV-Profiles` add permute/compact/saturating behaviors and reuse RSV mask/precision/memory semantics. Unsupported profiles are optional; bits are discoverable via RSV capability fields.
+**Optional profiles:** `XPHMG_RSV-Profiles` add permute/compact/saturating behaviors and reuse the RSV execution context plus CAP/XMEM policy. Unsupported profiles are optional; bits are discoverable via RSV capability fields.
 
 > See `XPHMG_RSV` and `XPHMG_RSV-Profiles` for encodings and CSR details.
 
-### 3.4 Matrix/Tensor Core (`XPHMG_MTX`)
+### 3.5 Matrix/Tensor Core (`XPHMG_MTX`)
 
 **Purpose:** small-tile matrix/tensor execution using CAP precision and XMEM data movement.
 
@@ -213,7 +257,7 @@ This section is informative. It summarizes each XPHMG substrate and its architec
 
 > Instruction encodings and CSR layouts are defined in `XPHMG_MTX`.
 
-### 3.5 Ray/Geometry (`XPHMG_RT`)
+### 3.6 Ray/Geometry (`XPHMG_RT`)
 
 **Purpose:** scalar ray-box/triangle primitives, BVH traversal, and optional descriptor-driven offload.
 
@@ -226,7 +270,7 @@ This section is informative. It summarizes each XPHMG substrate and its architec
 
 > Instruction encodings, descriptor formats, and BVH layout details are defined in `XPHMG_RT`.
 
-### 3.6 Graphics / Texture (`XPHMG_GFX`)
+### 3.7 Graphics / Texture (`XPHMG_GFX`)
 
 **Purpose:** instruction-level graphics/texture pipeline sharing the CAP/XMEM substrate.
 
@@ -238,7 +282,7 @@ This section is informative. It summarizes each XPHMG substrate and its architec
 
 > Instruction set and CSR details are defined in `XPHMG_GFX`.
 
-### 3.7 NPU / Tensor Offload (`XPHMG_NPU` descriptor)
+### 3.8 NPU / Tensor Offload (`XPHMG_NPU` descriptor)
 
 **Purpose:** descriptor-only path for GEMM/CONV/POOL/ELTWISE and related kernels.
 
@@ -270,7 +314,16 @@ This section defines cross-domain guarantees required for consistent behavior ac
 * Descriptor tails (`XPHMG_MEMCTL`) may override CAP defaults per job (domain/class/stream/security) where defined in the consuming extension; absent overrides, CAP defaults apply.
 * Gather/scatter (SVMEM) semantics?including mask, scale, sign, FOF, and fault index reporting?MUST match CAP/XMEM definitions for RSV, MTX, RT, GFX, and NPU paths.
 
-### 4.3 Cross-Domain Dataflow & Tile Handoff (Informative)
+### 4.3 Predicate & Mask Processing (PMASK -> All Domains)
+
+Predicate masks are treated as **first-class architectural state**, canonically sourced from
+`XPHMG_PMASK` and consumed across RSV, MTX, RT, GFX and ACCEL domains.
+
+Domains consuming predicate state apply CAP-defined numeric/writeback policy (e.g., ZMODE/EXC).
+Memory-side predication follows XMEM rules (masked lanes do not issue accesses).
+Fault/FOF reporting sinks are defined by the consuming ISA domain where applicable.
+
+### 4.4 Cross-Domain Dataflow & Tile Handoff (Informative)
 
 XPHMG domains target complementary scales; none supersedes another:
 
@@ -284,21 +337,21 @@ Shared CAP/XMEM state enables:
 * MTX to consume RSV-produced vectors without reformatting.
 * RT to use MTX outputs (e.g., transforms) without reprogramming precision.
 * GFX to use RSV permutes for layout changes without extra copies.
-* Consistent masked-lane semantics via `CAP.PREC.MODE.ZMODE` across domains.
+* Consistent predicate-false lane writeback via `CAP.PREC.MODE.ZMODE` across domains.
 
-#### 4.3.1 Unified Tile Handoff Model (Informative)
+#### 4.4.1 Unified Tile Handoff Model (Informative)
 
 * Tiles produced into a Tier-0 shared class (e.g., `CLS_SHARED`) use canonical XDL layout.
 * Ownership of the tile is transitioned explicitly (e.g., `DOM_RSV`, `DOM_GFX`, `DOM_RT`) via XMEM class/domain controls or descriptor metadata.
 * Consumers read the tile directly from XMEM; no architectural copies or reinterpretation are implied.
 
-### 4.4 Undefined / Reserved Behavior (Informative)
+### 4.5 Undefined / Reserved Behavior (Informative)
 
 * Behavior is UNDEFINED if software relies on mid-instruction visibility of CAP/XMEM updates or on diverged engine-local mirrors.
 * Behavior is UNDEFINED if software assumes advisory/hint fields alter correctness.
 * NOTE: This behavior is intentionally left unspecified in v0.1 and may be clarified in a future revision ? handling of partially programmed descriptors that are not subsequently submitted.
 
-### 4.5 Notes for Implementers (Informative)
+### 4.6 Notes for Implementers (Informative)
 
 * Program CAP/XMEM per phase; stage writes and rely on boundary latching (PREC via APPLY, XMEM at decode) to avoid transient states.
 * Use descriptor tails (`XPHMG_MEMCTL`) to align domain/class/stream policy across RT/NPU/GFX/MTX submissions; absent tails, CAP defaults apply.
@@ -420,14 +473,14 @@ This appendix is informative. It consolidates practical guidance for software, h
 
 1. **Latch CAP at instruction boundaries.** Mid-instruction CAP writes must not affect in-flight operations.
 2. **Treat CAP.XMEM as architectural.** Mirrors are micro-architectural; refresh at each instruction boundary.
-3. **Implement FOF/fault reporting consistently.** SVMEM fault-only-first and `SVFAULTI` behavior must match RSV definition.
+3. **Implement FOF/fault reporting consistently.** SVMEM fault-only-first reporting sinks must match the consuming ISA domain definition.
 4. **Favor robust accumulation.** Use FP32 accumulators internally for FP8/FP16/BF16 unless area/power constraints dominate.
 5. **Honor ZMODE uniformly.** Masked-lane writeback must follow `CAP.PREC.MODE.ZMODE` across domains that implement masking.
 
 ### A.3 Common Pitfalls
 
 1. **Non-latched CAP state:** Latch CAP precision/memory at decode; never allow mid-instruction visibility.
-2. **Inconsistent gather/scatter semantics:** Respect SVMEM masks, `FOF`, zero/merge masked lanes, and index scale/sign across domains.
+2. **Inconsistent gather/scatter semantics:** Respect SVMEM masks, `FOF`, zero/merge predicate-false lanes, and index scale/sign across domains.
 3. **LDS bank conflicts / soft budgets:** Mispartitioned classes can serialize RT/MTX; follow `CAP.XMEM.LDS_*` and class budgets.
 4. **Poor integration of RSV permutes with MTX:** Use RSV permutes to place tiles in LDS in the layout expected by MTX before execution.
 5. **Ignored stickies:** MTX, RSV, scalar ALU, and RT must propagate stickies to `CAP.PREC.EXC.ST` / `CAP.PREC.STAT`.

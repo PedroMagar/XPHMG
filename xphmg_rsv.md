@@ -1,7 +1,7 @@
 # RISC-V Scalar-Vectors (XPHMG_RSV)
 
 **Category:** Vendor Extension (`XPHMG_RSV`)
-**Version:** 0.1.0
+**Version:** 0.1.1
 **Author:** Pedro H. M. Garcia
 **Based on concepts by:** Luke Kenneth Casson Leighton (*Libre-SOC / Simple-V*)
 **License:** CC-BY-SA 4.0 (open specification)
@@ -13,13 +13,13 @@
 
 ## 1  Overview (Informative)
 
-`XPHMG_RSV` (RISC-V **Scalar-Vectors**) defines a lightweight **scalar-vector reinterpretation layer** for the RISC-V ISA. Rather than introducing a separate vector register file or a distinct execution model, RSV reuses existing scalar instructions and applies them repeatedly across a programmable register window under explicit control of vector length, stride, and optional predicate masks. RSV is designed as a *structural adaptation* of scalar code, not as a replacement for the standard RISC-V Vector (V) extension; when disabled, all instructions execute with their original scalar semantics and remain fully compatible with unextended RISC-V cores.
+`XPHMG_RSV` (RISC-V **Scalar-Vectors**) defines a lightweight **scalar-vector reinterpretation layer** for the RISC-V ISA. Rather than introducing a separate vector register file or a distinct execution model, RSV reuses existing scalar instructions and applies them repeatedly across a programmable register window under explicit control of vector length, stride, and predicate masks (XPHMG_PMASK). RSV is designed as a *structural adaptation* of scalar code, not as a replacement for the standard RISC-V Vector (V) extension; when disabled, all instructions execute with their original scalar semantics and remain fully compatible with unextended RISC-V cores.
 
 Unlike classical vector ISAs, RSV does not define its own numeric or memory policy. All precision, rounding, saturation, exception handling, masking semantics, and gather/scatter behavior are **architecturally inherited** from `XPHMG_CAP` and `XPHMG_XMEM`. At each instruction boundary, an RSV engine snapshots the effective `CAP.PREC.*` and `CAP.XMEM.*` state, ensuring consistent behavior across RSV, MTX, RT, GFX, and ACCEL domains.
 
 ### 1.1 Conceptual Model (Informative)
 
-* RSV acts as a per-instruction micro-loop: a scalar instruction is reissued for `VL` iterations using base/stride parameters taken from SV CSRs, with optional predicate gating of writeback.
+* RSV acts as a per-instruction micro-loop: a scalar instruction is reissued for `VL` iterations using base/stride parameters taken from SV CSRs, with predicate gating of lane execution and writeback via XPHMG_PMASK.
 * No additional architectural register file is introduced; RSV iterates over slices of the existing scalar register file according to `SVSRCA/SVSRCB/SVDST` base+stride state.
 * Underlying scalar instruction semantics (ALU, FP, load/store, CSR side effects) are preserved per lane; RSV only replicates the execution across lanes defined by `VL` and strides.
 * When RSV is inactive (`SVSTATE.EN=0`), the instruction stream is executed exactly as defined by the base ISA and other enabled extensions.
@@ -48,7 +48,7 @@ Unlike classical vector ISAs, RSV does not define its own numeric or memory poli
 ### 1.5 Notes for Implementers (Informative)
 
 * RSV can be realized as a decode-time micro-loop or similar mechanism; the micro-architectural strategy is implementation-defined provided the architectural invariants above are preserved.
-* Minimal implementations may omit optional predicate masks or saturation CSRs as described later; omitted CSRs must behave as specified in the Architectural State section.
+* Minimal implementations may omit optional saturation CSRs as described later; omitted CSRs must behave as specified in the Architectural State section.
 * Toolchains should assume RSV-enabled binaries remain executable on cores where RSV is disabled, with RSV prefixes treated as *Illegal Instruction* unless trapped or emulated by higher privilege firmware.
 
 ---
@@ -57,7 +57,7 @@ Unlike classical vector ISAs, RSV does not define its own numeric or memory poli
 
 ### 2.1 Scope Boundaries
 
-* RSV provides scalar-vector reinterpretation of existing scalar instructions using base+stride and predicate state held in SV CSRs.
+* RSV provides scalar-vector reinterpretation of existing scalar instructions using base+stride state held in SV CSRs and predicate state sourced from XPHMG_PMASK.
 * RSV does not introduce new arithmetic semantics, new register files, or new memory-side policies; it reuses existing scalar execution units and register files.
 * RSV operates independently of the RISC-V Vector (V) extension; neither reuses the other's architectural state.
 
@@ -96,7 +96,7 @@ Unlike classical vector ISAs, RSV does not define its own numeric or memory poli
 ### 2.7 Notes for Implementers (Informative)
 
 * Implementations may pipeline or micro-loop RSV behavior at decode or issue, provided CAP/XMEM state is latched per instruction boundary as required elsewhere in this specification.
-* Minimal implementations that omit optional SV CSRs (e.g., predicate masks, saturation overrides) must honor the defined reset and read/write behaviors in the Architectural State section.
+* Minimal implementations that omit optional SV CSRs (e.g., saturation overrides) must honor the defined reset and read/write behaviors in the Architectural State section.
 * Toolchains may assume RSV code remains executable on non-RSV cores via traps or emulation; no RSV-specific relocation or ABI changes are required.
 
 NOTE: Any vendor-specific CAP or XMEM extensions not described here are outside the scope of RSV v0.1; their interaction with RSV may be clarified in a future revision.
@@ -119,12 +119,12 @@ NOTE: Any vendor-specific CAP or XMEM extensions not described here are outside 
 ### 3.3 CSR Allocation and Access
 
 * RSV CSRs occupy the vendor range **0x7F8-0x7FF**. Accesses to unimplemented RSV CSRs must trap as *Illegal Instruction*.
-* Optional CSRs (e.g., predicate masks, saturation override) obey the read/write behaviors defined in the Architectural State section; absence of an optional CSR does not change the numbering of other RSV CSRs.
+* Optional CSRs (e.g., saturation override) obey the read/write behaviors defined in the Architectural State section; absence of an optional CSR does not change the numbering of other RSV CSRs.
 
 ### 3.4 Dependency on CAP/XMEM Semantics
 
 1. RSV gather/scatter must follow SVMEM rules from XMEM; RSV may not define independent gather/scatter behavior.
-2. RSV masked writeback uses `CAP.PREC.MODE.ZMODE`; masked lanes either merge or zero according to the effective CAP setting.
+2. Effective predication from PMASK (selected by pbank) gates writeback; `CAP.PREC.MODE.ZMODE` selects merge vs zero for predicate-false lanes.
 3. Floating-point exceptions and precision behavior follow CAP global semantics; RSV does not define its own exception model.
 
 ---
@@ -145,7 +145,7 @@ for i = 0 .. VL-1:
 | ------------ | ------------------------------------ |
 | **VL**       | Vector length (number of iterations) |
 | **incA/B/D** | Register increments (stride)         |
-| **pred[i]**  | Predicate mask bit (optional)        |
+| **pred[i]**  | Predicate bit from PMASK bank `pbank_eff` |
 
 `inc=0` => broadcast. VL >= 1.
 
@@ -157,9 +157,16 @@ for i = 0 .. VL-1:
 
 ### 4.3 Predicate Masking
 
-* Predicate bits are sourced from `SVPMASK*` when implemented; if predicate CSRs are absent, all predicate bits are treated as 1.
-* Masked-off lanes do not update the destination register; writeback behavior for masked lanes follows `CAP.PREC.MODE.ZMODE` (merge vs zero) as defined in Section 9.
-* Predicate state is latched at instruction decode along with other SV CSRs.
+* RSV predication consumes only the **effective predication mask** defined by `XPHMG_PMASK`.
+* For each RSV-affected instruction, an effective PMASK bank `pbank_eff` is selected as follows:
+  1. If the instruction encoding explicitly carries a `pbank` field (implementation-defined per instruction family), that value is used.
+  2. Otherwise, `SVSTATE.PBANK` is used.
+  3. If neither is implemented, `pbank_eff` defaults to `0`.
+* `pbank=0` refers to **PMASK bank0**, which is **architecturally virtual ALL-ONES** (all lanes active), regardless of physical storage.
+* For lane `i`, `pred[i] = PMASK.bank[pbank_eff][i]` as defined by `XPHMG_PMASK`.
+* **Masked-off lanes MUST NOT execute**: they MUST NOT read operands, MUST NOT generate exceptions, and MUST NOT produce architecturally visible side-effects.
+* For any instruction form that would otherwise perform memory transactions (including loads, stores, AMOs/atomics, and gather/scatter), **masked-off lanes MUST NOT emit memory accesses**. This requirement is satisfied by consuming XMEM semantics without issuing per-lane requests for `pred[i]=0`.
+* Destination writeback for masked-off lanes is governed exclusively by `CAP.PREC.MODE.ZMODE` (merge vs zero) (see Section 9).
 
 ### 4.4 Vector Length (VL)
 
@@ -189,22 +196,22 @@ for i = 0 .. VL-1:
 
 ### 5.1 CSR Map (0x7F8 - 0x7FF)
 
-| Addr  | Name         | Purpose                                                             |
-| ----- | ------------ | ------------------------------------------------------------------- |
-| 0x7F8 | **SVSTATE**  | Enable bit `EN`, ONE_SHOT, BLK, VL, mode flags (pred/reduce/width). |
-| 0x7F9 | **SVSRCA**   | Source A base + stride.                                             |
-| 0x7FA | **SVSRCB**   | Source B base + stride.                                             |
-| 0x7FB | **SVDST**    | Destination base + stride.                                          |
-| 0x7FC | **SVPMASK0** | Predicate bits [31:0].                                              |
-| 0x7FD | **SVPMASK1** | Predicate bits [63:32].                                             |
-| 0x7FE | **SVSAT**    | Saturation / element-width override.                                |
-| 0x7FF | **SVFAULTI** | Index of element that faulted.                                      |
+| Addr  | Name        | Purpose                                                                 |
+| ----- | ----------- | ----------------------------------------------------------------------- |
+| 0x7F8 | **SVSTATE** | Enable and lifetime control; VL; mode flags; **PBANK** selection.       |
+| 0x7F9 | **SVSRCA**  | Source A base + stride.                                                 |
+| 0x7FA | **SVSRCB**  | Source B base + stride.                                                 |
+| 0x7FB | **SVDST**   | Destination base + stride.                                              |
+| 0x7FC | *(reserved)*| Reserved (must trap if accessed).                                       |
+| 0x7FD | *(reserved)*| Reserved (must trap if accessed).                                       |
+| 0x7FE | **SVSAT**   | Saturation / element-width override (optional).                         |
+| 0x7FF | **SVFAULTI**| Index of element that faulted.                                          |
 
 ### 5.2 CSR Definitions
 
-* **SVSTATE (0x7F8)**: Holds enable (`EN`), one-shot/block control (`ONE_SHOT`, `BLK`), latched VL, and mode flags (predication/reduction/width). SVSTATE is sampled at decode for each RSV-affected instruction. BLK decrements as described in Section 7; when BLK reaches zero, `EN` clears. Reset value is 0.
+* **SVSTATE (0x7F8)**: Holds enable (`EN`), one-shot/block control (`ONE_SHOT`, `BLK`), latched VL, mode flags, and the active PMASK bank selector **`PBANK`**. `PBANK` selects the `XPHMG_PMASK` bank used for effective predication when the instruction form does not provide an explicit `pbank` field. `PBANK` is sampled at decode for each RSV-affected instruction. BLK decrements as described in Section 7; when BLK reaches zero, `EN` clears. Reset value is 0 (implying `PBANK=0`).
+  * `PBANK` (WARL): Optional PMASK bank select consumed by RSV predication. If unimplemented, `PBANK` reads as 0.
 * **SVSRCA / SVSRCB / SVDST (0x7F9-0x7FB)**: Provide base register indices and strides for source A, source B, and destination. Base and stride fields are sampled at decode and applied uniformly across all lanes of the instruction. Reserved bits read as zero; writes to reserved bits are ignored. Reset values are 0.
-* **SVPMASK0/1 (0x7FC-0x7FD, optional)**: Provide predicate bits [63:0]. If predicate CSRs are not implemented, they read as all ones and ignore writes; predication is effectively disabled (all lanes active). Predicate state is sampled at decode.
 * **SVSAT (0x7FE, optional)**: Provides saturation and element-width override controls where implemented. If unimplemented, reads return zero and writes are ignored; saturation events must still update CAP precision status as defined in Section 9.
 * **SVFAULTI (0x7FF)**: Records the index of the first faulting element for an RSV-affected instruction. Reset value is 0. If no fault has occurred, the contents are implementation-defined. NOTE: Write semantics for clearing or setting SVFAULTI are implementation-defined in v0.1 and may be clarified in a future revision.
 
@@ -218,7 +225,7 @@ for i = 0 .. VL-1:
 ### 5.4 Architectural Invariants
 
 * SV CSR state used by an instruction is the snapshot taken at decode; later CSR changes do not affect the instruction in flight.
-* Optional CSRs that read as all ones (predicates) or zeros (saturation override) must not alter the behavior of implemented CSRs or numbering.
+* Optional CSRs that read as zero (e.g., saturation override) must not alter the behavior of implemented CSRs or numbering.
 * VL in SVSTATE governs repetition until explicitly changed or until the block counter expires (see Section 7).
 
 ### 5.5 Notes for Implementers (Informative)
@@ -299,7 +306,7 @@ imm[0]   -> ZMODE (1 = zeroing, 0 = merge)
 
 ### 7.2 CSR Snapshot Timing
 
-* At instruction decode, the implementation snapshots SVSTATE, SVSRCA, SVSRCB, SVDST, SVPMASK*, SVSAT, and relevant CAP/XMEM state (see Section 9) for the RSV-affected instruction.
+* At instruction decode, the implementation snapshots SVSTATE, SVSRCA, SVSRCB, SVDST, SVSAT, and relevant CAP/XMEM state (see Section 9) for the RSV-affected instruction.
 * Changes to SV CSRs or CAP/XMEM after decode do not affect the instruction already decoded.
 * If BLK expires or EN clears after decode but before completion, the in-flight instruction completes with the snapshot taken at decode.
 
@@ -307,7 +314,7 @@ imm[0]   -> ZMODE (1 = zeroing, 0 = merge)
 
 * For each lane `i` in `0..VL-1`, source and destination register indices are computed from the decoded base and stride fields in SVSRCA/SVSRCB/SVDST.
 * Strides apply uniformly across all lanes of the instruction; stride or base misalignment is not corrected by the implementation and may lead to overlapping registers if programmed so by software.
-* Predicate bits, if present, gate writeback; masked-off lanes follow `CAP.PREC.MODE.ZMODE` for destination writeback.
+* Predicate bits from PMASK (per `pbank_eff`) gate lane execution and writeback; masked-off lanes follow `CAP.PREC.MODE.ZMODE` for destination writeback.
 
 ### 7.4 Interaction with CAP/XMEM State
 
@@ -464,7 +471,7 @@ imm[0]   -> ZMODE (1 = zeroing, 0 = merge)
 
 ### 10.7 Debug / Replay and State Exposure
 
-* Implementations must expose RSV state (SVSTATE, masks, SVDST, SVMEM) and the latched CAP.PREC/ST/XMEM state to debug and replay tools.
+* Implementations must expose RSV state (SVSTATE incl. PBANK, SVDST, SVMEM) and the latched CAP.PREC/ST/XMEM state to debug and replay tools; PMASK state is exposed via XPHMG_PMASK.
 * Exposure must align with instruction boundaries to permit deterministic replay when CAP precision or rounding modes change dynamically.
 
 ### 10.8 Privilege and Delegation
@@ -488,14 +495,13 @@ Implementations may advertise support for any subset of the optional RSV profile
 
 | Extension | Description                                                       |
 | --------- | ----------------------------------------------------------------- |
-| `XRSVP`   | Adds Predication and optional masked zero/merge (uses CAP.ZMODE). |
 | `XRSVR`   | Adds Reduction operations.                                        |
 | `XRSVS`   | Adds Saturation and Width override.                               |
 | `XRSVGZ`  | Allows writable x0 during SV execution.                           |
 
 ### 11.3 Architectural Invariants
 
-* All optional-profile instructions obey RSV predication (`SVPMASK*`) and masked-lane writeback policy `CAP.PREC.MODE.ZMODE`.
+* All optional-profile instructions obey RSV predication (PMASK, per `pbank_eff`) and masked-lane writeback policy `CAP.PREC.MODE.ZMODE`.
 * Integer saturation must set `CAP.PREC.STAT.SAT_HIT`; FP behavior follows CAP precision rules.
 * Memory-touching forms consume `CAP.XMEM.DOM` and may use streaming profiles from `CAP.XMEM.SPROF*`; masked lanes must not generate memory requests.
 * Unsupported element widths or operations must raise *Illegal Instruction*.
@@ -514,7 +520,6 @@ Implementations may advertise support for any subset of the optional RSV profile
 ### 11.6 Notes for Implementers (Informative)
 
 * Optional profiles share the same SV CSR state; no additional RSV CSRs are defined by these profiles in v0.1.
-* When `XRSVP` is present, predicate masks map to `SVPMASK*`; mask-off behavior follows `ZMODE` (merge/zero) per Section 6.
 * Widening/narrowing and permutation operations that exceed native format support must report status in CAP (`DOWNCAST_TAKEN`, `UNSUP_FMT`) as described in Section 9.
 
 ---
@@ -583,7 +588,7 @@ fadd.s x30, x10, x20    # broadcast x20, zero masked-off lanes per ZMODE
 Shows predicated FP addition with mask-controlled writeback following CAP.ZMODE.
 
 ```asm
-# VL = 16, mask in SVPMASK0, zeroing active
+# VL = 16, predication via PMASK (pbank_eff), zeroing active
 svsetvl x0, 16
 csrrw  x0, 0x7C1, x10   # base A (zmm2)
 csrrw  x0, 0x7C2, x20   # base B (zmm3)
@@ -608,7 +613,7 @@ svon.one
 fmul.s x10, x10, x5
 ```
 
-NOTE: All examples assume CAP/XMEM defaults are configured appropriately (e.g., EFF_EW matches operand width, DOM/CLS settings permit the accesses) and that optional CSRs used (SVPMASK*, SVSAT) are implemented; otherwise, behavior falls back to the defaults defined in Sections 5-9.
+NOTE: All examples assume CAP/XMEM defaults are configured appropriately (e.g., EFF_EW matches operand width, DOM/CLS settings permit the accesses) and that optional CSRs used (e.g., SVSAT) are implemented; otherwise, behavior falls back to the defaults defined in Sections 5-9.
 
 ---
 

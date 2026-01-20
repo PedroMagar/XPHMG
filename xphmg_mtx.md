@@ -2,8 +2,8 @@
 **Matrix/Tensor Core for Small MxN Transforms and Inference Primitives**
 
 **Category:** Vendor Extension (`XPHMG_MTX`)  
-**Version:** 0.1.0  
-**Author:** Pedro H. M. Garcia  
+**Version:** 0.1.1
+**Author:** Pedro H. M. Garcia
 **License:** CC-BY-SA 4.0 (open specification)
 
 ---
@@ -17,20 +17,20 @@
 * MTX treats matrices and tiles as logical MxN shapes built from canonical 4x4 subtiles. Shape is carried by immediates rather than opcode variants.
 * Compute-only: MTX opcodes do not allocate, move, or stream data; XMEM/RSV descriptors govern residency and access.
 * Numeric behavior is precision-neutral: opcodes carry no format fields unless stated; element and accumulator formats come from CAP effective state.
-* MTX reuses unified architectural state (CAP, XMEM, RSV predicates) rather than introducing profile-local state.
+* MTX reuses unified architectural state (CAP, XMEM, PMASK predicates) rather than introducing profile-local state.
 
 ### 1.2 Architectural Guarantees & Invariants
 
 * MTX must not override CAP numeric policy or XMEM memory policy. Effective precision, rounding, saturation, NaN/FTZ, quantization, and ZMODE come from CAP at the instruction boundary.
 * Tile shapes and bank mappings must honor `MTXCAP.MAX_SHAPE` and `CAP.TILE` limits; illegal shapes trap.
-* Masking, predication, and ZMODE follow RSV/RSV-SVMEM rules; masked lanes must not use alternate semantics.
+* Predication consumes PMASK effective predicates; masked lanes follow CAP.PREC.MODE.ZMODE and XMEM predication rules and must not use alternate semantics.
 * MTX introduces no architectural CSRs beyond the MTX bank/config registers in Section 4.
 
 ### 1.3 Interaction with CAP / XMEM / Other Extensions
 
 * CAP supplies PET/EW/ACCW, rounding, exception enables/stickies, and ZMODE; MTX instructions consume these without reinterpretation.
 * XMEM controls residency, coherence domains, streaming profiles, and LDS usage for tiles; MTX relies on XMEM/descriptor state for data motion.
-* RSV may drive predication, indexing, and gather/scatter for MTX tiles; results are consumable by RSV/RT/GFX/ACCEL without reformatting when stored in canonical layouts.
+* RSV may drive indexing and gather/scatter for MTX tiles; predication consumes PMASK effective predicates (pbank selected by prefix or instruction field); results are consumable by RSV/RT/GFX/ACCEL without reformatting when stored in canonical layouts.
 
 ### 1.4 Undefined / Reserved Behavior
 
@@ -40,7 +40,7 @@
 
 ### 1.5 Notes for Implementers (Informative)
 
-* Use XMEM/RSV mechanisms for data motion and masking; avoid duplicating control in MTX.
+* Use XMEM for data motion and PMASK for predication; avoid duplicating control in MTX.
 * Expose capability bits (e.g., HAS_MUL/MAD/BIAS, MAX_SHAPE) via MTXCAP for software feature probing.
 * Keep opcode decoding independent of precision formats to minimize ISA churn; format evolution occurs in CAP, not MTX.
 
@@ -52,7 +52,7 @@ This section lists architectural prerequisites and optional companions for MTX. 
 
 - **Required:** `XPHMG_CAP` precision block (`CAP.PREC.MODE`, `CAP.PREC.ALT`, `CAP.PREC.STAT`). MTX instructions consume CAP effective precision, rounding, saturation, NaN/FTZ, quantization, and sticky/exception enables.
 - **Recommended:** `XPHMG_XMEM` for LDS allocation, coherence/partitioning, streaming profiles, and descriptor-driven memory policy. Without XMEM, MTX tiles must be staged by software using standard loads/stores, and coherence/streaming controls fall back to platform defaults.
-- **Optional:** `XPHMG_RT` (for hybrid RTU+NPU pipelines), `RSV` (predicate and loop control), `V` (if present). Integration with these domains relies on canonical tile layouts and shared CAP/XMEM state; no MTX-specific contracts are added.
+- **Optional:** `XPHMG_RT` (for hybrid RTU+NPU pipelines), `RSV` (loop control; predication via PMASK), `V` (if present). Integration with these domains relies on canonical tile layouts and shared CAP/XMEM state; no MTX-specific contracts are added.
 
 ---
 
@@ -61,10 +61,10 @@ This section lists architectural prerequisites and optional companions for MTX. 
 This informative section summarizes the guiding principles behind MTX: the execution core shape, how precision is sourced, how data moves, and how MTX fits into the broader XPHMG architecture. These principles frame the normative rules in later sections.
 
 - **Small-core, high-reuse:** a single 4x4 MAC datapath is time-multiplexed across smaller or rectangular shapes to minimize area while sustaining throughput on small tiles.  
-- **Precision-neutral ISA:** opcodes do not encode format bits unless stated; all numeric behavior (PET/EW/ACCW, rounding, FTZ/SAT/NaN policy) comes from `XPHMG_PREC` and the CAP effective state.  
+- **Precision-neutral ISA:** opcodes do not encode format bits unless stated; all numeric behavior (PET/EW/ACCW, rounding, FTZ/SAT/NaN policy) comes from `CAP.PREC.MODE/ALT/STAT`.  
 - **Descriptor-first I/O:** all data motion (cache/streaming, LDS allocation, swizzle) is handled by XMEM (`XMEM.LDG/STG/PREF`, `XLDS.*`, `XSWZ.*`) or by software; MTX opcodes compute only and rely on canonical tile layouts for interop.  
 - **Low-latency per tile:** optimized for per-vertex transforms, per-pixel blocks, and small tensor tiles where control overhead and reuse dominate.  
-- **Unified state consumption:** MTX reuses CAP and XMEM controls and RSV predicates; capability bits (e.g., `MTXCAP`) describe what is implemented rather than changing semantics.
+- **Unified state consumption:** MTX reuses CAP and XMEM controls and PMASK predicates; capability bits (e.g., `MTXCAP`) describe what is implemented rather than changing semantics.
 
 ---
 
@@ -78,20 +78,20 @@ This subsection lists the MTX control/status registers. It specifies their roles
 
 | Address  | Name      | Access | Description                                                                                                           |
 |----------|-----------|--------|-----------------------------------------------------------------------------------------------------------------------|
-| 0x7D8    | `MTXCFG`  | RW     | Global flags: `TRANSPOSE_DEF(0)`, `BIAS_EN(1)`, `SAT_EN(2)` (hint; effective saturation is governed by `XPHMG_PREC`). |
+| 0x7D8    | `MTXCFG`  | RW     | Global flags: `TRANSPOSE_DEF(0)`, `BIAS_EN(1)`, `SAT_EN(2)` (hint; effective saturation is governed by `CAP.PREC.MODE`). |
 | 0x7D9    | `MTXSEL`  | RW     | Active matrix bank selector (0-3).                                                                                    |
-| 0x7DA    | `MTX2`    | RW     | Banked storage for 2x2 (4 elements, packed by `XPHMG_PREC` formats).                                                  |
+| 0x7DA    | `MTX2`    | RW     | Banked storage for 2x2 (4 elements, packed by `CAP.PREC.STAT` effective formats).                                     |
 | 0x7DB    | `MTX3`    | RW     | Banked storage for 3x3 (9 elements; rectangular shapes use sub-blocks).                                               |
 | 0x7DC    | `MTX4`    | RW     | Banked storage for 4x4 (16 elements).                                                                                 |
 | 0x7DD    | `MTXBIAS` | RW     | Optional bias vector (2-4 elements, packed).                                                                          |
 | 0x7DE    | `MTXSTAT` | RO     | Status/counters: `ops_issued`, `ops_saturated`, `ftz_events`, `last_shape`.                                           |
 | 0x7DF    | `MTXCAP`  | RO     | Capabilities: `HAS_MUL`, `HAS_MAD`, `HAS_BIAS`, `MAX_SHAPE(2b)` (2x2..4x4).                                            |
 
-> Packing and endianness: element packing and size follow the effective precision (`XPREC_STAT`). Software may load via ordinary stores or use `MTX.LD`.
+> Packing and endianness: element packing and size follow the effective precision (`CAP.PREC.STAT`). Software may load via ordinary stores or use `MTX.LD`.
 
 Invariants:
 
-* `MTXSEL` selects the active bank for subsequent MTX operations; bank contents are interpreted per `XPHMG_PREC` effective state.
+* `MTXSEL` selects the active bank for subsequent MTX operations; bank contents are interpreted per `CAP.PREC.STAT` effective state.
 * `MTXCFG` provides hints only; saturation behavior is controlled by CAP effective precision.
 * `MTXCAP` is read-only and advertises implemented features; software must probe `HAS_*` and `MAX_SHAPE` before issuing corresponding operations.
 * `MTXSTAT` fields are observational and must not affect architectural state visible to other instructions.
@@ -135,7 +135,7 @@ Notes and constraints:
 | 4x2   | 8        | MTX4 (first 2 cols) |
 | 4x4   | 16       | MTX4                |
 
-All packing (FP8/BF16/FP16/FP32, INT8/INT4) follows `XPHMG_PREC`.
+All packing (FP8/BF16/FP16/FP32, INT8/INT4) follows `CAP.PREC.STAT`.
 
 ---
 
@@ -145,11 +145,11 @@ This section defines how MTX tiles are interpreted under CAP precision, how memo
 
 ### 5.1 Precision Model Integration
 
-All numeric behavior comes from **XPHMG_PREC**:
+All numeric behavior comes from **CAP.PREC**:
 
-- Program base and alternate formats via `XPREC_MODE` / `XPREC_ALT`, then verify with `XPREC_STAT`.  
+- Program base and alternate formats via `CAP.PREC.MODE` / `CAP.PREC.ALT`, then verify with `CAP.PREC.STAT`.  
 - Fields such as `ACCW`, `SAT`, `FP_RMODE`, `DENORM_FTZ`, `Q`, `PACK` are not redefined here.  
-- Implementations must execute MTX operations using the effective precision reported by `XPREC_STAT`.
+- Implementations must execute MTX operations using the effective precision reported by `CAP.PREC.STAT`.
 
 Invariants:
 
@@ -188,23 +188,33 @@ Conformance rules:
 Forbidden: MTX-local rounding, NaN, quantization, or saturation rules. MTX only uses CAP effective precision semantics.  
 No additional CAP-derived controls beyond those listed are consumed in v0.1; future MTX variants must enumerate any new controls explicitly.
 
-#### 5.3.2 Mask & ZMODE Semantics
+#### 5.3.2 Predication & ZMODE Semantics (PMASK)
 
-When MTX uses masking (partial tiles, edge tiles, RSV-driven launches), masked elements follow `CAP.PREC.MODE.ZMODE`:
+MTX consumes effective predication only from PMASK, per `xphmg.md`:
+
+```
+pred[i] = PMASK.bank[pbank_eff][i]
+```
+
+where `pbank_eff` is selected by an instruction `pbank` field when present or by an architectural predication prefix; if no selection is provided, `pbank = 0` (virtual ALL-ONES). MTX defines no local predicate/mask registers or implicit predicate sources.
+
+Execution under predication is mandatory: for any element/lane/tile with `pred[i] = 0`, MTX MUST NOT execute the operation, MUST NOT read operands (source tiles, matrices, accumulators), MUST NOT raise exceptions, and MUST NOT produce side-effects (including accumulator updates, flags, or architectural state). This applies uniformly to fused-multiply-add/dot/reduction ops, accumulator updates, conversion/packing, and any operation that writes register-like destinations.
+
+Masked writeback follows `CAP.PREC.MODE.ZMODE`:
 
 | ZMODE | Behavior                                         |
 |-------|--------------------------------------------------|
-| 0     | masked elements preserve prior accumulator value |
+| 0     | masked elements preserve prior destination value |
 | 1     | masked elements write architectural zero (per EW)|
 
-Applies to MTX.LD (masked tile loads), MTX.MUL/MTX.MAD partial-tile compute, and any MTX op using RSV predicate masks. MTX may not invent alternate masked-lane semantics.
+Destination for MTX includes tile banks (`MTX2/MTX3/MTX4/MTXBIAS`), accumulator state, scalar register results, and result buffers. MTX MUST NOT define any alternate predicated writeback policy.
 
 #### 5.3.3 FP Exceptions & Sticky Flags
 
 MTX operations must report: `SAT_HIT`, `FTZ_HIT`, `DOWNCAST_TAKEN`, `UNSUP_FMT`, and FP stickies (`NV`, `DZ`, `OF`, `UF`, `NX`, `QNAN_SEEN`, `SNAN_SEEN`).
 
 Trap rules: trap only if `EXC.EN[bit]=1` and `EFF_SAE=0`. If SAE override applies (CAP or RSV prefix), suppress trap but set stickies.  
-First-fault: MTX does not define FOF for math pipelines; if RSV drives indexing, `RSV.SVFAULTI` applies. For MTX memory FOF, see Section 5.3.4.
+First-fault: MTX does not define FOF for math pipelines; first-fault reporting uses the architecturally defined fault-reporting sink for the consuming ISA domain. For MTX memory FOF, see Section 5.3.4.
 
 #### 5.3.4 Unified Memory Behavior (CAP.XMEM -> MTX)
 
@@ -214,11 +224,12 @@ Mandatory rules:
 
 1. Coherence: use the domain from `CAP.XMEM.DOM` unless a descriptor overrides it.  
 2. Streaming: prefetch and stride rules match RSV/GFX.  
-3. SVMEM: indexed tile loads must use SVMEM, including predication, address scaling, FOF, and ZMODE for masked destinations.  
-4. Compression: if enabled in `CAP.XMEM.COMP_CTL`, MTX adopts the same default.  
-5. Descriptors: only explicitly set fields in `XPHMG_MEMCTL` override CAP defaults.  
+3. Predication: for any MTX memory-visible operation, elements/lanes/tiles with `pred[i] = 0` MUST NOT issue memory accesses and MUST NOT fault; memory-side predication is governed by `XPHMG_XMEM`.  
+4. SVMEM: indexed tile loads must use SVMEM, including predication, address scaling, FOF, and ZMODE for masked destinations.  
+5. Compression: if enabled in `CAP.XMEM.COMP_CTL`, MTX adopts the same default.  
+6. Descriptors: only explicitly set fields in `XPHMG_MEMCTL` override CAP defaults.  
 
-FOF: If an MTX tile load uses SVMEM with FOF=1, on first fault write the index to `SVFAULTI`, abort, and allow software retry. MTX must not define a different FOF mechanism.
+FOF: If an MTX tile load uses SVMEM with FOF=1, on first fault report the index via the fault-reporting sink defined by the consuming ISA domain, abort, and allow software retry. MTX must not define a different FOF mechanism.
 
 #### 5.3.5 Cross-Domain Dataflow Guarantees (MTX <-> RSV/RT/GFX/NPU)
 
@@ -256,12 +267,12 @@ MTX must expose to debug: latched CAP.PREC effective state, CAP.XMEM effective s
 
 #### 5.3.10 Summary
 
-MTX is a consumer of the unified XPHMG architectural state: precision from CAP, memory from CAP.XMEM, mask/FOF/addressing via RSV SVMEM rules. MTX is not a separate subsystem.
+MTX is a consumer of the unified XPHMG architectural state: precision from CAP, memory from CAP.XMEM, and mask/FOF/addressing via PMASK and XMEM SVMEM rules. MTX is not a separate subsystem.
 
 ### 5.4 Exceptions & Status
 
 * Illegal Instruction: unsupported shape when `MTXCAP.MAX_SHAPE` is smaller; `HAS_MAD=0` with `MTX.MAD`.  
-* Precision downgrade: reflected in `XPREC_STAT` (`UNSUP_FMT`, `DOWNCAST_TAKEN`, `SAT_HIT`, `FTZ_HIT`).  
+* Precision downgrade: reflected in `CAP.PREC.STAT` (`UNSUP_FMT`, `DOWNCAST_TAKEN`, `SAT_HIT`, `FTZ_HIT`).  
 * `MTXSTAT` may increment `ops_saturated` and `ftz_events` for profiling.  
 
 Notes:
@@ -349,7 +360,7 @@ Numeric behavior follows CAP precision policy. If saturation or other exceptiona
 
 ## 7 Instruction Set (Normative)
 
-This section defines the MTX instruction forms, their operands, and required behaviors. Encodings use the custom-2 opcode space (`0x5B`). All encodings are I-type 32-bit unless noted. `SHAPE` must not exceed `MTXCAP.MAX_SHAPE`; illegal shapes trap. Precision, masking, ZMODE, and exceptions follow CAP/RSV rules defined in Sections 4-5. Final `funct` values remain in the vendor table.
+This section defines the MTX instruction forms, their operands, and required behaviors. Encodings use the custom-2 opcode space (`0x5B`). All encodings are I-type 32-bit unless noted. `SHAPE` must not exceed `MTXCAP.MAX_SHAPE`; illegal shapes trap. Precision, predication, ZMODE, and exceptions follow CAP/PMASK/XMEM rules defined in Sections 4-5. Final `funct` values remain in the vendor table.
 
 ### 7.1 `MTX.LD` - Load Matrix Bank from Memory (convenience)
 
@@ -365,7 +376,7 @@ Fields (in `imm`):
 - `ROWMAJOR`    (bit 5)  
 - `WITH_BIAS`   (bit 6)
 
-Semantics: load matrix elements (and optional bias) from `[rs1]` into the active bank (`MTXSEL`). Element interpretation uses the effective precision (`XPREC_STAT`). Rectangular shapes map to sub-blocks of `MTX3/MTX4`. It is illegal if `SHAPE` exceeds `MTXCAP.MAX_SHAPE`.
+Semantics: load matrix elements (and optional bias) from `[rs1]` into the active bank (`MTXSEL`). Element interpretation uses the effective precision (`CAP.PREC.STAT`). Rectangular shapes map to sub-blocks of `MTX3/MTX4`. It is illegal if `SHAPE` exceeds `MTXCAP.MAX_SHAPE`.
 
 Note: Software may also fill MTXx via ordinary `csrw` stores; `MTX.LD` is a helper.
 
@@ -443,7 +454,7 @@ Conformance and reporting rules:
 
 Compatibility describes how MTX coexists with other XPHMG components and legacy paths. It does not add MTX-specific modes beyond CAP/XMEM.
 
-- Precision control for MTX is provided through `XPHMG_PREC` and the associated CAP precision state.
+- Precision control for MTX is provided through `CAP.PREC.*`.
 - MTX data loads/stores are defined through standard memory operations and `XPHMG_XMEM` + LDS; bespoke `XREG` paths and legacy `XMEM.DMA`/`XMEM.LDGPR/STGPR` opcodes are outside this specification.
 
 ---
@@ -479,9 +490,9 @@ This informative section provides worked sequences that demonstrate how MTX inst
 This example shows precision setup, bank load, and a simple matrix-vector multiply on a 2x3 shape.
 
 ```asm
-# Precision (XPHMG_PREC)
+# Precision (CAP.PREC)
 li  t0, ( (0b10<<22) /*ACCW=FP32*/ | (0b011<<19) /*PET=FP16*/ | (0b01<<17) /*EW=16*/ | (1<<31) )
-csrw 0x7E0, t0   # XPREC_MODE.APPLY0=1
+csrw 0x7D0, t0   # CAP.PREC.MODE (APPLY0=1)
 
 # Load matrix bank 0 from memory (row-major 2x3)
 csrw 0x7D9, x0   # MTXSEL=0
@@ -501,7 +512,7 @@ This example uses an alternate precision mode to perform a 4x4 transform with FP
 ```asm
 # Alternate precision
 li  t1, (1<<30) /*ALT_EN*/ | (0b0010<<26) /*FP8_E4M3*/ | (0b01<<24) /*ALT_ACCW=FP16*/ | (1<<22) /*MIXED*/ | (1<<31)
-csrw 0x7E1, t1   # XPREC_ALT.APPLY1=1
+csrw 0x7D1, t1   # CAP.PREC.ALT (APPLY1=1)
 
 # 4x4 transform of 8 vectors (contiguous)
 MTX.MUL imm=(0x44 | (0<<4) | (0<<5) | (0b111<<6) | (0<<9)), rs1=a1, rd=a2
@@ -536,4 +547,4 @@ This section provides non-normative guidance on microarchitectural choices and p
 ---
 
 *CC-BY-SA 4.0 -- Open Specification maintained by Pedro H. M. Garcia.*  
-Designed to integrate with `XPHMG_PREC`, `XPHMG_XMEM`, `XPHMG_RT`, and optional `RSV` or `V`.
+Designed to integrate with `XPHMG_CAP`, `XPHMG_XMEM`, `XPHMG_RT`, and optional `RSV` or `V`.

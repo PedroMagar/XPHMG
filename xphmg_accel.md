@@ -3,7 +3,7 @@
 **Generic Descriptor-driven Accelerators / NPU**
 
 - **Category:** Vendor Extension (`XPHMG_ACCEL`)
-- **Version:** 0.1.0
+- **Version:** 0.1.1
 - **Depends on:** `XPHMG_CAP`, `XPHMG_XMEM`
 - **Author:** Pedro H. M. Garcia
 - **License:** CC-BY-SA 4.0 (open specification)
@@ -29,7 +29,7 @@
 ### 1.3 Interaction with CAP / XMEM / Other Extensions
 
 - CAP provides precision capabilities, effective element types, and FP exception behavior used by ACCEL operations.
-- XMEM provides memory domains, classing, LDS budgeting, and streaming controls used by ACCEL. ACCEL uses the same SVMEM configuration for indexed or predicated access.
+- XMEM provides memory domains, classing, LDS budgeting, and streaming controls used by ACCEL. ACCEL uses the same SVMEM configuration for indexed access, and predicated access consumes effective PMASK-based predication per the XPHMG predication model (see `xphmg.md`).
 - ACCEL interoperates with other XPHMG domains without adding new coherence or exception domains. Capability discovery uses CAP.FEAT* and CAP.TIER.* (see Section 10).
 
 ### 1.4 Undefined / Reserved Behavior
@@ -73,10 +73,10 @@ ACCEL is bound to existing XPHMG components and does not introduce independent p
 
 - `XPHMG_CAP` - for:
   - `CAP.PREC.MODE/ALT/STAT/EXC.*` (precision, formats, FP policy),
-  - `CAP.FEAT*`, `CAP.TIER.*` (feature discovery and hints).:contentReference[oaicite:1]{index=1}
+  - `CAP.FEAT*`, `CAP.TIER.*` (feature discovery and hints)
 - `XPHMG_XMEM` - for:
   - `CAP.XMEM.*` (L1/L2, LDS, classes, compression),
-  - `CAP.XMEM.SVM*` (SVMEM indexed gather/scatter configuration).:contentReference[oaicite:2]{index=2}
+  - `CAP.XMEM.SVM*` (SVMEM indexed gather/scatter configuration)
 
 ACCEL units must snapshot CAP and XMEM at descriptor granularity:
 
@@ -115,7 +115,7 @@ ACCEL exposes a minimal CSR surface for submitting work and observing descriptor
 
 ### 5.1 CSR Map (high-level)
 
-`XPHMG_ACCEL` deliberately avoids allocating CSRs in the `0x7C0-0x7FF` XPHMG CAP window (already owned by `XPHMG_CAP` and `XPHMG_RSV`).:contentReference[oaicite:3]{index=3}
+`XPHMG_ACCEL` deliberately avoids allocating CSRs in the `0x7C0-0x7FF` XPHMG CAP window (already owned by `XPHMG_CAP` and `XPHMG_RSV`).
 
 Instead, it defines:
 
@@ -280,15 +280,34 @@ This section defines how ACCEL interprets descriptors relative to CAP/XMEM state
    - Trap as Illegal Instruction / Unsupported Descriptor (vendor choice, but must be documented).
 3. FP exceptions raised by ACCEL operations must update `CAP.PREC.EXC.ST` stickies and honor `CAP.PREC.EXC.EN` and SAE policy, consistent with RSV/MTX/RT.
 
-### 7.4 Memory rules
+### 7.4 Predication and masked execution
+
+ACCEL consumes only effective predication as defined by the XPHMG predication model (`xphmg.md`). The only architecturally defined predicate source is PMASK:
+
+```
+pred[i] = PMASK.bank[pbank_eff][i]
+```
+
+where `pbank_eff` is selected by an existing architectural prefix or an instruction field (where applicable in ACCEL encodings). If no selector is present, `pbank = 0` is the default and denotes a virtual ALL-ONES bank.
+
+For any predicated ACCEL operation:
+
+1. Lanes/tiles/threads with `pred[i] = 0` MUST NOT execute and MUST NOT read operands.
+2. Masked lanes/tiles/threads MUST NOT raise exceptions or produce side-effects.
+3. Memory-visible operations (DMA, loads/stores, gather/scatter, atomics, streaming, scratchpad moves) MUST NOT issue memory accesses for masked lanes/tiles/threads, consistent with `XPHMG_XMEM`.
+4. Writeback for predicate-false elements is governed exclusively by `CAP.PREC.MODE.ZMODE`:
+   - `merge`: masked elements preserve the previous destination value.
+   - `zero`: masked elements write zero.
+
+"Destination" in ACCEL contexts means the architecturally visible per-element result storage of the operation (e.g., register file, accumulator/tile register, or result buffer). ACCEL MUST NOT define its own predicate source or writeback policy beyond PMASK and `CAP.PREC.MODE.ZMODE`.
+
+### 7.5 Memory rules
 
 1. ACCEL loads/stores must obey `CAP.XMEM.DOM`, `CAP.XMEM.L1CFG`, `CAP.XMEM.CLSMAP`, `CAP.XMEM.LDS_BUDGET`, streaming profiles, and XMEM event semantics.
-2. Indexed or indirect addressing used by ACCEL must use the same SVMEM configuration (`CAP.XMEM.SVM*`) as RSV/MTX/GFX/RT:
-   - Predication must respect `SVPMASK*` when ACCEL operations are driven by RSV masks (hybrid vector/NPU flows).
-   - Zeroing versus merge for masked lanes must respect `CAP.PREC.MODE.ZMODE`.
+2. Indexed or indirect addressing used by ACCEL must use the same SVMEM configuration (`CAP.XMEM.SVM*`) as RSV/MTX/GFX/RT. Predicated memory behavior follows Section 7.4 and `XPHMG_XMEM`.
 3. ACCEL-specific memory failures (e.g., out-of-bounds, misalignment, LDS out-of-memory) must set appropriate bits in `CAP.XMEM.EVENTS` for unified telemetry.
 
-### 7.5 Interaction with descriptor queues
+### 7.6 Interaction with descriptor queues
 
 - Descriptor linkage via `next` is singly-linked. Cycles or malformed chains are undefined and may result in vendor-defined error signaling.
 - Doorbell writes that reference descriptors must ensure descriptors are fully written and visible per platform memory ordering before notification. ACCEL assumes descriptors are immutable after doorbell unless the platform ABI defines otherwise.

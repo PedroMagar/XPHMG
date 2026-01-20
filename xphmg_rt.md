@@ -2,8 +2,8 @@
 **Ray/Geometry Primitives, BVH Traversal Conventions, and Optional RT Offload**
 
 **Category:** Vendor Extension (`XPHMG_RT`)  
-**Version:** 0.1.0 
-**Author:** Pedro H. M. Garcia  
+**Version:** 0.1.1
+**Author:** Pedro H. M. Garcia
 **License:** CC-BY-SA 4.0 (open specification)
 
 ---
@@ -38,7 +38,8 @@ Terminology. The following terms are used in this document:
 * **Ray record:** per-lane structure containing ray origin, direction, and traversal interval (`tmin`, `tmax`). Additional fields are software-defined unless explicitly specified.
 * **BVH node tile:** fixed-size node layout containing child AABBs and metadata, stored in LDS or cached memory for traversal.
 * **LDS/LMEM:** local memory space managed under `XPHMG_XMEM`, used for low-latency storage of tiles, queues, and stacks.
-* **Predicate:** per-lane condition state used for masking and control flow; RT instructions update it and respect RSV masking rules.
+* **Predicate:** per-lane condition state used for masking and control flow. RT consumes only effective predication from PMASK as defined in `xphmg.md`:
+  `pred[i] = PMASK.bank[pbank_eff][i]`, where `pbank_eff` is selected by architectural prefix or instruction field and `pbank=0` denotes a virtual ALL-ONES bank. RT does not define its own masking or lane-enable state.
 * **Queue descriptor:** ring buffer descriptor with `{head, tail, cap, rsv, base}` fields describing ray, hit, and miss queues.
 * **Effective precision:** numeric format derived from `XPHMG_CAP.PREC.*` state that governs operand interpretation and result rounding.
 
@@ -84,7 +85,7 @@ This subsection lists the CSRs used by XPHMG_RT. The table specifies address, ac
 | 0x7FA4| `RTQ_RAY`  | RW     | Ray queue descriptor (LMEM ring) — see §6. |
 | 0x7FA5| `RTQ_HIT`  | RW     | Hit queue descriptor (LMEM ring). |
 | 0x7FA6| `RTQ_MISS` | RW     | Miss queue descriptor (LMEM ring). |
-| 0x7FA7| `RTCONF2`  | RW     | Secondary config: epsilon scalar, mask behavior (impl-defined fields). |
+| 0x7FA7| `RTCONF2`  | RW     | Secondary config: epsilon scalar; implementation-defined hint bits (must not affect predication or CAP.PREC.MODE.ZMODE). |
 | 0x7FA8| `RTCLSDEF` | RW     | Default class/QoS: `{DEF_CLASS(1:0), HYB_ENABLE, HYB_BORROW_QOS(2:0)}` (mirrors `xmem_descpol`). |
 | 0x7FA9| `RTSPROF`  | RW     | Default streaming profile id (0..3) used when descriptor omits `sprof_id`. |
 
@@ -140,7 +141,7 @@ Unless stated otherwise, RT CSRs reset to 0, RO fields ignore writes, and reserv
 | Bits       | Name          | Access | Description |
 |------------|---------------|--------|-------------|
 | bits[7:0]  | `EPS_SCALE`   | RW     | Epsilon scalar encoding used when `EPS_CTL=1`. |
-| bits[9:8]  | `MASK_BEHAV`  | RW     | Mask behavior control (implementation-defined; reads as 0 if unsupported). |
+| bits[9:8]  | `IMPL_HINT`  | RW     | Implementation-defined hints; must not affect PMASK predication or CAP.PREC.MODE.ZMODE. Reads as 0 if unsupported. |
 | bits[XLEN-1:10] | reserved | RAZ/WI | Reserved. |
 
 **RTCLSDEF (0x7FA8) layout**
@@ -300,7 +301,7 @@ NOTE: Stack depth, spill/fill behavior, and overflow handling are software-defin
 
 ## 7. Instruction Set (major opcode `CUSTOM-0`, suggested 0x0B)
 
-This section defines the architectural encoding and semantics of the RT instructions. All RT instructions use the `CUSTOM-0` major opcode and the I-type 32-bit format. Each instruction operates per lane, updates the predicate state, and optionally writes results to `rd` in the effective precision. Numeric behavior is governed by `XPHMG_CAP.PREC.*`, and memory access behavior is governed by `XPHMG_XMEM`.
+This section defines the architectural encoding and semantics of the RT instructions. All RT instructions use the `CUSTOM-0` major opcode and the I-type 32-bit format. Each instruction operates per lane under effective PMASK predication (Section 8.2), may update predicate state for predicate-true lanes where defined, and optionally writes results to `rd` in the effective precision. The effective predicate bank is selected by architectural prefix or an instruction field when provided; otherwise `pbank=0` (virtual ALL-ONES) applies. Numeric behavior is governed by `XPHMG_CAP.PREC.*`, and memory access behavior is governed by `XPHMG_XMEM`.
 
 All are **I-type 32-bit**:
 `imm[11:0] | rs1 | funct3 | rd | opcode`
@@ -325,6 +326,8 @@ The immediate field encodes per-instruction options that control clamping, predi
 * bit3 `W_GUARD`    — if clip-space `w==0`, force miss
 * bits[11:4] `RSV`  — zeros
 
+Note: `PRED_ONLY` suppresses `rd` writeback only; predication and masked-lane suppression are unchanged.
+
 **Operands**
 
 * `rs1`: base of **ray record** (origin/dir/tmin/tmax)
@@ -333,6 +336,7 @@ The immediate field encodes per-instruction options that control clamping, predi
 
 **Semantics**
 Per-lane slab test; sets **predicate**; optionally writes `(tnear,tfar)`.
+Predicate-false lanes are suppressed per Section 8.2.
 Implementations **should** use FP32 internal math for robustness when inputs are ≤FP16/INT.
 
 ---
@@ -357,6 +361,8 @@ The immediate field encodes per-instruction options that control culling, predic
 * bit3 `EPS_CTL`    — use `RTCONF2` epsilon scaling
 * bits[11:4] `RSV`
 
+Note: `PRED_ONLY` suppresses `rd` writeback only; predication and masked-lane suppression are unchanged.
+
 **Operands**
 
 * `rs1`: base of **ray record**
@@ -365,6 +371,7 @@ The immediate field encodes per-instruction options that control culling, predic
 
 **Semantics**
 Watertight Möller–Trumbore; updates predicate; optional `(t,u,v)` writeback.
+Predicate-false lanes are suppressed per Section 8.2.
 Internal accumulation may be FP32 regardless of input EW.
 
 ---
@@ -431,22 +438,47 @@ RT may use **internal FP32 math for robustness**, but **output must still follow
 
 ---
 
-### 8.2 ZMODE (Zero vs Merge) for Masked Lanes
+### 8.2 Predication Model and Masked Execution (PMASK)
 
-This subsection defines how masked lanes are treated when RT instructions are executed under RSV masking. The ZMODE setting determines whether masked-off lanes preserve or zero `rd` elements.
+RT consumes only effective predication as defined by the XPHMG predication model in `xphmg.md`:
 
-If RT is invoked via RSV or uses predicate masks inside a wavefront:
+    pred[i] = PMASK.bank[pbank_eff][i]
 
-| ZMODE | Behavior                                  |
-| ----- | ----------------------------------------- |
-| 0     | masked-off lanes preserve rd element      |
-| 1     | masked-off lanes write architectural zero |
+`pbank_eff` is selected by an existing architectural prefix or an instruction field where applicable. If no selector is present, `pbank=0` is implied and denotes a virtual ALL-ONES bank.
 
-RT **must** use the same rules as RSV/MTX/GFX.
+RT does not define alternate predicate sources, ray-enable bits, or implicit lane suppression mechanisms.
+
+For any RT operation (inline or descriptor-driven), lanes with `pred[i]=0` are masked off and:
+
+* MUST NOT execute traversal, intersection, or shading work.
+* MUST NOT read or update ray state, payloads, hit records, or queues.
+* MUST NOT raise exceptions or contribute to fault/termination events.
+* MUST NOT produce side-effects.
+
+Predicate-producing RT instructions update the selected PMASK bank only for predicate-true lanes; predicate-false lanes preserve prior predicate state. Termination, miss, and early-exit behavior is orthogonal to predication.
 
 ---
 
-### 8.3 FP Exceptions & Sticky Flags
+### 8.3 Memory Operations Under Predication (XMEM)
+
+All RT memory interactions are governed by `XPHMG_XMEM`. For any RT stage that touches memory (including BVH traversal and node fetch, primitive/geometry fetch, texture sampling, buffer/image loads, atomics, ray payload storage, and hit/miss queue updates), predicate-false lanes MUST NOT issue memory accesses or produce memory side-effects. See `XPHMG_XMEM` for predication, SVMEM, and FOF details; fault-reporting sinks are defined by the consuming ISA domain.
+
+---
+
+### 8.4 Writeback Policy (CAP.PREC.MODE.ZMODE)
+
+Writeback for predicate-false lanes is governed exclusively by `CAP.PREC.MODE.ZMODE`; RT defines no additional writeback or suppression policy.
+
+| ZMODE | Behavior                                  |
+| ----- | ----------------------------------------- |
+| 0     | predicate-false lanes preserve destination |
+| 1     | predicate-false lanes write architectural zero |
+
+In RT contexts, "destination" includes any architecturally visible output produced by an RT operation, such as `rd` results, hit attributes, ray payload fields, and hit/miss record entries as defined by the consuming ISA domain. Store-like RT effects (payload/hit record/queue writes) remain suppressed for predicate-false lanes per Section 8.3; ZMODE applies to any architectural destinations that are written.
+
+---
+
+### 8.5 FP Exceptions & Sticky Flags
 
 This subsection specifies how RT operations contribute to floating-point exception state and sticky flags. RT must follow the same exception and SAE rules used by RSV and MTX.
 
@@ -470,11 +502,11 @@ If SAE override applies (CAP or `svon.fpctl`):
 * **Trap is suppressed**
 * Sticky bits must still be set
 
-The first faulting lane is recorded in `SVFAULTI` if invoked via RSV.
+The first-faulting lane index is reported via the architecturally visible mechanism defined by the consuming ISA domain.
 
 ---
 
-### 8.4 Memory Behavior via XMEM
+### 8.6 Memory Behavior via XMEM
 
 This subsection defines memory behavior for RT instructions and optional offload. All RT memory accesses (BVH tiles, triangle fetches, queues) are governed by `XPHMG_XMEM`; RT does not introduce an independent memory model.
 
@@ -510,7 +542,7 @@ RT must not implement custom DMA rules — only XMEM.
 
 ---
 
-### 8.5 Descriptor Interop (`XPHMG_MEMCTL`)
+### 8.7 Descriptor Interop (`XPHMG_MEMCTL`)
 
 This subsection specifies how descriptor-provided `XPHMG_MEMCTL` fields override CAP defaults for RT offload. Only explicitly set fields are used to override CAP state.
 
@@ -530,7 +562,7 @@ No RT-specific memory policy is allowed.
 
 ---
 
-### 8.6 Ray–Geometry Numeric Requirements
+### 8.8 Ray–Geometry Numeric Requirements
 
 This subsection constrains the numeric outputs of `RT.BBOX` and `RT.TRI` to ensure consistent results across domains. It does not define new algorithms beyond the instruction semantics.
 
@@ -549,7 +581,7 @@ NaN propagation must follow CAP rules.
 
 ---
 
-### 8.7 Cross-Domain Dataflow Guarantees
+### 8.9 Cross-Domain Dataflow Guarantees
 
 This subsection defines interoperability guarantees between RT and other XPHMG domains. These statements constrain how data is interpreted across domains; they do not introduce new operations.
 
@@ -558,7 +590,7 @@ This subsection defines interoperability guarantees between RT and other XPHMG d
 RT and RSV interoperate through masking, scheduling, and lane predicates. The following behaviors are required:
 
 * RSV may generate rays or reorder rays
-* RSV masking and ZMODE apply directly to RT
+* Effective PMASK predication and `CAP.PREC.MODE.ZMODE` apply directly to RT
 
 #### **RT ↔ MTX**
 
@@ -582,7 +614,7 @@ RT and scalar code interoperate through a consistent lane-0 behavior model. The 
 
 ---
 
-### 8.8 CAP/XMEM State-Change Rules (“Apply semantics”)
+### 8.10 CAP/XMEM State-Change Rules (“Apply semantics”)
 
 This subsection defines how CAP and XMEM state changes are observed by RT instructions. State updates become effective at instruction boundaries, and RT must not observe partial updates.
 
@@ -620,7 +652,7 @@ struct XPHMG_RT_DESC {
 * **Sync:** `XFENCE.WAIT ticket` / `XFENCE.SIGNAL`.
 * **Behavior:** device may implement in-core micro-scheduler or dispatch to a dedicated RTU.
 
-> This path is **optional**; scalar `RT.*` instructions remain normative.
+> This path is **optional**; scalar `RT.*` instructions remain normative. Descriptor-driven execution obeys the PMASK predication, XMEM memory, and ZMODE writeback rules in Section 8.
 
 Ordering and completion: Submissions to a given RT offload queue are processed in FIFO order. The ticket returned by `XSUBMIT.RT` is monotonically increasing for that queue; completion of a ticket implies completion of that submission and all prior submissions to the same queue. `XFENCE.WAIT` for a ticket guarantees that descriptor-driven memory effects (including hit/miss queue updates) are visible according to `XPHMG_XMEM`. Ordering across distinct queues is unspecified.
 

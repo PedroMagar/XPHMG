@@ -3,7 +3,7 @@
 **Capabilities, Numeric Policy & Precision**
 
 **Category:** Vendor Extension (`XPHMG_CAP`)
-**Version:** 0.1.0
+**Version:** 0.1.1
 **Author:** Pedro H. M. Garcia
 **License:** CC-BY-SA 4.0 (open specification)
 
@@ -134,7 +134,7 @@ TODO-ELABORATE: Expand Tier-1 capability hints and connect to CAP.TIER/CAP.TILE.
 
 **Architectural guarantees & invariants:**
 * CAP.XMEM state (classes, coherence, streaming, descriptors) is the single architectural source of memory defaults for all domains; domain-local mirrors are micro-architectural and MUST NOT change semantics.
-* SVMEM defaults (`CAP.XMEM.SVM*`) apply to indexed gather/scatter across RSV/GFX/MTX/RT; masked-lane behavior follows `CAP.PREC.MODE.ZMODE`.
+* SVMEM defaults (`CAP.XMEM.SVM*`) apply to indexed gather/scatter across RSV/GFX/MTX/RT; predication is sourced from PMASK (effective predication) and masked-lane register writeback follows `CAP.PREC.MODE.ZMODE` while masked lanes MUST NOT issue memory accesses.
 * Tier ownership changes (handoff) MUST obey CAP.XMEM ordering and coherence rules; Tier-0 handoff is the only architectural cross-engine path without copying.
 
 **Interaction with other extensions (informative):**
@@ -146,7 +146,24 @@ TODO-ELABORATE: Expand Tier-1 capability hints and connect to CAP.TIER/CAP.TILE.
 * Program CAP.XMEM.* before dispatch; changes take effect at the next instruction boundary without APPLY.
 * If a feature bit in `CAP.XMEM.CAP` is 0, writes to dependent fields are ignored; software should probe capabilities before programming optional features.
 
-### 2.3 Cross-Domain Execution, Masks, Exceptions
+### 2.3 Predication Model (PMASK-owned state, CAP-owned policy)
+
+`XPHMG_CAP` does not define predicate state. Predicate state is defined by `XPHMG_PMASK` and consumed by XPHMG domains.
+CAP defines the **policy invariants** that bind predication across domains (writeback behavior and memory side-effects).
+
+**Normative requirements:**
+1. **Architectural source:** Any XPHMG domain that implements predication MUST source predication from `XPHMG_PMASK` (effective predication), not from domain-local mask state.
+2. **Effective predication:** For each operation, the effective predicate is the PMASK bank selected by the operation’s `pbank` (explicitly encoded by the consuming extension or implied by its enable/prefix rules). If an operation does not select a bank, `pbank=0` is implied.
+3. **bank0 semantics:** If `XPHMG_PMASK` is present, `pbank=0` MUST behave as a virtual ALL-ONES predicate (reads as all-ones for the effective predicate width; writes ignored).
+4. **Writeback policy:** For any architecturally visible register/vector destination element whose predicate is false, the destination MUST follow `CAP.PREC.MODE.ZMODE`:
+   - `ZMODE=0` (**merge**): preserve the prior destination element.
+   - `ZMODE=1` (**zero**): write architectural zero to the destination element.
+5. **Memory side-effects:** Predicated memory operations MUST NOT issue memory accesses for predicate-false elements/lanes. This rule applies uniformly to scalar predication, lane-based predication, and indexed gather/scatter (SVMEM).
+
+NOTE: CAP defines the policy above; the selecting/encoding of `pbank` and any predicate-producing instructions are defined by the consuming extensions (e.g., RSV/RT/GFX) and by `XPHMG_PMASK` itself.
+
+
+### 2.4 Cross-Domain Execution, Masks, Exceptions
 
 NOTE: Normative cross-domain rules are consolidated in Section 5.
 
@@ -272,10 +289,11 @@ These CSRs expose non-binding feature discovery bits for software capability pro
 2. Bits not defined in Table 4.2.1 MUST read as zero and MUST be ignored by software.
 3. Feature bits are non-binding: software MUST treat a set bit as *"supported by the implementation"* and a clear bit as *"unsupported or not exposed"*.
 
-| CSR         | Addr  | Access | Description                                     |
-| ----------- | ----- | ------ | ----------------------------------------------- |
-| `CAP.FEAT0` | 0x7C5 | RO     | General features (bindless, OOO mem, RT, etc.). |
-| `CAP.FEAT1` | 0x7C6 | RO     | Sync/barrier features, PMU presence.            |
+| CSR             | Addr  | Access | Description                                                          |
+| --------------- | ----- | ------ | -------------------------------------------------------------------- |
+| `CAP.FEAT0`     | 0x7C5 | RO     | General features (bindless, OOO mem, RT, etc.).                      |
+| `CAP.FEAT1`     | 0x7C6 | RO     | Sync/barrier features, PMU presence.                                 |
+| `CAP.PMASK.CAP` | 0x7C7 | RO     | Predicate-mask discovery (presence, bank count, bank0 ALL-ONES rule).|
 
 **Informative:** Feature bits group optional capabilities; they do not alter architectural behavior without explicit enablement elsewhere.
 
@@ -295,6 +313,22 @@ Suggested mapping (non-exhaustive):
 * `PMU_PRESENT`: XPHMG-specific performance counters present.
 
 Undefined bits read zero and MUST be ignored by software.
+
+##### 4.2.1.1 Predicate-mask discovery (`CAP.PMASK.CAP`) (RO, non-binding)
+
+`CAP.PMASK.CAP` provides capability discovery for the **architectural predication substrate** defined by `XPHMG_PMASK`.
+This CSR is descriptive only; it does not enable predication by itself.
+
+**Normative requirements:**
+1. If `PMASK_PRESENT=0`, the implementation does not expose `XPHMG_PMASK` architectural state. Any predication-dependent behavior in other extensions is unavailable unless that extension defines a software fallback; CAP does not define such a fallback.
+2. If `PMASK_PRESENT=1`, the implementation MUST provide banked predicate state as defined by `XPHMG_PMASK`, including the bank0 ALL-ONES rule.
+3. `PMASK_BANKS` reports the number of architecturally visible predicate banks (including bank0). Baseline XPHMG expects 4 banks.
+
+**Bit layout (v0.1):**
+- bit[0]  `PMASK_PRESENT` : 1 if `XPHMG_PMASK` predicate state is implemented.
+- bits[3:1] `PMASK_BANKS_M1` : bank count minus one (`banks = PMASK_BANKS_M1 + 1`).
+- bit[4]  `BANK0_ALLONES` : 1 if `pbank=0` is a virtual ALL-ONES bank (MUST be 1 when `PMASK_PRESENT=1`).
+- bits[XLEN-1:5] reserved, read as zero.
 
 TODO-ELABORATE: Define FEAT0 bit positions and add missing FEAT1 table.
 
@@ -592,7 +626,7 @@ These CSRs hold architectural defaults for memory classes, streaming, coherence,
 These CSRs provide default parameters for indexed gather/scatter (SVMEM). They are architectural and apply to all domains that issue indexed memory operations.
 
 **Normative requirements:**
-1. SVMEM operations MUST honor predication: masked-off lanes (per `SVPMASK*`) MUST NOT issue memory accesses.
+1. SVMEM operations MUST honor predication: masked-off lanes (per effective predication (PMASK, per selected `pbank`)) MUST NOT issue memory accesses.
 2. Masked-lane writeback MUST follow `CAP.PREC.MODE.ZMODE` (merge vs zeroing) unless a per-instruction override is provided elsewhere.
 3. Fault-Only-First (FOF): if `FOF=1`, the first faulting element MUST store its index in `SVFAULTI` (as defined in RSV) and the operation MUST abort; a retry may resume from that index.
 4. RW fields in Table 4.6.3 MUST be applied at instruction boundary. Writes to fields tied to unsupported features MUST be ignored and read as zero.
@@ -639,7 +673,7 @@ Numeric semantics defined by CAP (precision, rounding, saturation, NaN policy, q
 
 #### 5.1.3 Uniform Mask & Predication Semantics
 
-Masked lanes across RSV/GFX/MTX/RT that implement predication MUST follow `CAP.PREC.MODE.ZMODE` for masked-off writeback (merge vs zero). If a domain lacks predication, this rule is N/A.
+Masked operations in any domain that implements predication MUST derive the effective predicate from PMASK (per selected `pbank`) and MUST apply `CAP.PREC.MODE.ZMODE` to predicate-false *register-like* destinations (merge vs zero). Predicated memory operations (including indexed gather/scatter) MUST NOT issue memory accesses for predicate-false elements/lanes.
 
 #### 5.1.4 FP Exception & Sticky Consistency
 

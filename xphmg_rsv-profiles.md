@@ -3,7 +3,7 @@
 ## Optional Scalar-Vector Profiles for XPHMG_RSV
 
 **Category:** Vendor Extension Addendum (`XPHMG_RSV-Profiles`)
-**Version:** 0.1.0
+**Version:** 0.1.1
 **Author:** Pedro H. M. Garcia
 **License:** CC-BY-SA 4.0 (open specification)
 
@@ -25,7 +25,7 @@ The base `XPHMG_RSV` extension defines:
 
 * scalar-vector reinterpretation,
 * vector length and register windows,
-* predicate masks and masking semantics,
+* predication semantics,
 * interaction with CAP-controlled numeric policy and XMEM-controlled memory behavior.
 
 `XPHMG_RSV-Profiles` **does not modify** any of these rules.
@@ -33,8 +33,8 @@ The base `XPHMG_RSV` extension defines:
 All profiles:
 
 * reuse the existing RSV enablement (`svon.*`),
-* operate on the same register windows and masks (`SVSTATE`, `SVPMASK*`, `SVSRC*`, `SVDST`),
-* inherit numeric precision, rounding, saturation, quantization, exception handling, and ZMODE behavior from `XPHMG_CAP`,
+* operate on the same register windows and state (`SVSTATE`, `SVSRC*`, `SVDST`),
+* inherit numeric precision, rounding, saturation, quantization, and exception handling from `XPHMG_CAP`,
 * inherit memory behavior, domains, and gather/scatter semantics from `XPHMG_XMEM`.
 
 No profile introduces new global CSRs, new numeric modes, or profile-specific memory rules.
@@ -61,7 +61,8 @@ Unless explicitly stated otherwise:
 * All instructions defined in this document are **optional**.
 * Lack of support must result in an *illegal instruction* exception.
 * All instructions execute under the **effective CAP state** latched at the instruction boundary.
-* All masking, predication, and fault behavior is identical to base RSV semantics.
+* Predication for all RSV profiles consumes the unified XPHMG predication model; the effective predicate is sourced exclusively from PMASK as defined in `xphmg.md`, and profiles do not define, enable, disable, or modify predication behavior.
+* All fault behavior is identical to base RSV semantics.
 
 No profile may override, reinterpret, or bypass CAP or XMEM rules.
 
@@ -86,7 +87,7 @@ Such changes must preserve the architectural semantics of the RSV base and the g
 ### 1.6 Conceptual Model
 
 * Profiles are **execution subsets** layered on top of the RSV base. Each profile contributes only additional opcodes; it does not redefine RSV state, CSRs, or enablement flows.
-* All profiles **share the RSV execution context**: `SVSTATE`, `SVPMASK*`, `SVSRC*`, `SVDST`, and the VL/EW model defined by `XPHMG_RSV`.
+* All profiles **share the RSV execution context**: `SVSTATE`, `SVSRC*`, `SVDST`, and the VL/EW model defined by `XPHMG_RSV`.
 * A profile is either **absent or fully present** in an implementation. Partial support within a named profile is illegal unless explicitly enumerated in the conformance levels of Section 7.
 * Unsupported instructions are architecturally required to raise *illegal instruction*, mirroring RSV base behavior for absent subfeatures.
 
@@ -94,7 +95,6 @@ Such changes must preserve the architectural semantics of the RSV base and the g
 
 * Profiles **cannot override** `XPHMG_CAP` numeric policy (precision, rounding, saturation, quantization, NaN/FTZ handling) or `XPHMG_XMEM` memory policy (domains, FOF, streaming hints).
 * All profile instructions execute under the **effective CAP state** latched at the instruction boundary; there is no profile-local policy override.
-* **Predication and masking** follow RSV rules: masked-off lanes honor `CAP.PREC.MODE.ZMODE` (merge vs. zero).
 * **Register windowing and pair-destination legality** are inherited from RSV: pair writes require even `rd` and `SVDST.stride == 1`; violations are *illegal instruction*.
 * Profiles do **not introduce new CSRs**; any profile-related observability (e.g., counters) is non-architectural unless defined elsewhere.
 
@@ -124,7 +124,8 @@ This section records the common rules inherited from `XPHMG_RSV`, `XPHMG_CAP`, a
 
 ### 2.1 Mask, Exceptions, and Policy Interactions (All Profiles)
 
-* **Masking model:** `SVPMASK*` applies uniformly to all profile instructions. Masked-off lanes produce no architecturally visible register or memory writes; destination lane contents follow `CAP.PREC.MODE.ZMODE` (merge vs. zero). The same predicate gates both halves of a pair destination.
+Predication for all RSV-Profile instructions follows the unified XPHMG predication model defined in `xphmg.md`.
+
 * **CAP state latching:** The effective CAP state (`EFF_*`) is latched at the instruction boundary exactly as in RSV. Profiles do not establish profile-local overrides; numeric behavior (rounding, NaN, FTZ, saturation flags) is wholly defined by CAP.
 * **Numeric policy:** FP payload permutations preserve bit patterns and observe CAP FP policy; integer saturating ops are value-saturating only and set `SAT_HIT` without raising traps.
 * **FOF and retry:** Register-only forms cannot generate memory faults. Memory-touching forms (`svscat.cmp`, `svgath.exp`) inherit the RSV/`XPHMG_XMEM` fault-only-first rules, including recording the first-fault index and terminating the operation per the base retry contract.
@@ -144,7 +145,6 @@ All RSV-Profile instructions (PRMT, CEXP, SAT) operate on values interpreted usi
 * `EFF_FP_RMODE`
 * `EFF_ZMODE`
 * `EFF_Q`, ZP, SCALE_SH
-* ZMODE zero-vs-merge
 
 Profiles **must not override** global precision behavior.
 When narrowing, if the target format is not natively supported, the hardware must:
@@ -157,8 +157,7 @@ When narrowing, if the target format is not natively supported, the hardware mus
 Any profile that interacts with memory (compaction/gather expansion) must:
 
 * use `CAP.XMEM.SVM*` definitions,
-* obey RSV predicates,
-* obey ZMODE,
+* obey effective predication as defined by the XPHMG predication model (`xphmg.md`),
 * apply FOF identically to RSV and MTX domains,
 * follow coherence domain from `CAP.XMEM.DOM`.
 
@@ -168,7 +167,7 @@ All saturating ops must:
 
 * saturate according to the representable range of `EFF_PET/EW`,
 * set `SAT_HIT`,
-* treat masked stores using ZMODE,
+* treat masked stores per the XPHMG predication model (`xphmg.md`),
 * not change global exception routing.
 
 #### 2.2.4 Permute Profiles & AOS/SOA Rules
@@ -178,7 +177,6 @@ All permutation-based profiles must:
 * preserve FP bit patterns,
 * use the same narrowing/widening semantics as MTX,
 * never bypass CAP precision rules,
-* use ZMODE for masked destinations,
 * update STAT if unsupported narrowing is requested.
 
 #### 2.2.5 Interoperability With Other Domains
@@ -208,7 +206,7 @@ This section summarizes the common encoding conventions for all RSV-Profile inst
 * **Major opcode:** `custom-1` (`0101011`) for all XRSV-Profiles instructions.
 * **Types used:** R-type (register), I-type (small immediates), and "R-pair" (R-type with an implied second destination via RSV stride).
 * **Pair-dest rule (widening ops):** when `PAIR=1` (see funct7), results are written to **rd(lo)** and **rd^1 (hi)**. This is **legal only if** `rd` is even **and** `SVDST.stride==1`. Otherwise: *Illegal Instruction* (per Section 2).
-* **Masks & ZMODE:** All ops honor `SVPMASK*`; masked writeback follows `CAP.PREC.MODE.ZMODE`.
+* **Predication:** All ops consume the effective predicate defined by the XPHMG predication model (see `xphmg.md`).
 * **Numeric policy:** FP/INT behavior per `CAP.PREC.*` (SAE/RC/NaN/FTZ), with optional `svon.fpctl` override. No profile-specific numeric policy exists.
 * **Reserved bit patterns:** Unless specified, unused immediate bits and reserved funct7 values must be encoded as zero and are architecturally *illegal instruction* if non-zero.
 
@@ -264,7 +262,7 @@ This section summarizes the common encoding conventions for all RSV-Profile inst
 
 ### 4.1 Profile Overview
 
-**XRSV-PRMT** defines permutation, interleave/de-interleave, and table lookup operations over RSV register windows. The profile reuses the RSV execution context (`SVSTATE`, `SVPMASK*`, `SVSRC*`, `SVDST`) and does not introduce profile-local state. Its purpose is to provide common data-reordering idioms without changing RSV’s masking, numeric, or memory contracts.
+**XRSV-PRMT** defines permutation, interleave/de-interleave, and table lookup operations over RSV register windows. The profile reuses the RSV execution context (`SVSTATE`, `SVSRC*`, `SVDST`) and does not introduce profile-local state. Its purpose is to provide common data-reordering idioms without changing RSV's masking, numeric, or memory contracts.
 
 Conceptual model:
 
@@ -282,7 +280,7 @@ We divide by **funct3** (major group) and then by **funct7** (sub-op). Unless no
 
 | funct7  | Mnemonic      | Type   | Operands                    | Notes                                                               |
 | ------- | ------------- | ------ | --------------------------- | ------------------------------------------------------------------- |
-| 0000000 | svperm.v      | R      | rd, rs1=a, rs2=idx          | rd[i] = a[idx[i]] (OOB: zero if ZMODE=1 else merge)                 |
+| 0000000 | svperm.v      | R      | rd, rs1=a, rs2=idx          | rd[i] = a[idx[i]] (OOB handled per RSV predicated writeback policy; see `xphmg.md`) |
 | 0000001 | svpermi2.v    | R      | rd, rs1=a, rs2=idx          | Two-source via MSB of idx selects a/b; **b** is SVSRCB window       |
 | 0000010 | svshuffle.v   | I      | rd, rs1=a, imm12=pat        | Structured patterns (see table below)                               |
 | 0000011 | svzip.lo      | R-pair | rd(lo), rs1=a, rs2=b        | Interleave low; writes rd and rd^1                                  |
@@ -293,9 +291,7 @@ We divide by **funct3** (major group) and then by **funct7** (sub-op). Unless no
 
 *R-pair legality:* Illegal if `rd` is odd or `SVDST.stride != 1`.
 
-**Predication & ZMODE:** Masked-off lanes behave per `ZMODE` (merge or zero).
-
-**Indices/OOB:** For `svperm.*` and `svtbl.*`, out-of-range indices produce **zero** if `ZMODE=1`, else **merge** keeps destination (portable choice). Implementations may set a *non-architectural* OOB counter.
+**Indices/OOB:** For `svperm.*` and `svtbl.*`, out-of-range indices are handled per RSV predicated writeback policy (see `xphmg.md`). Implementations may set a *non-architectural* OOB counter.
 
 **`svshuffle.v` pattern encoding (imm12=pat):**
 * Upper imm bits reserved (0).
@@ -316,14 +312,14 @@ We divide by **funct3** (major group) and then by **funct7** (sub-op). Unless no
 
 *R-pair legality:* Illegal if `rd` is odd or `SVDST.stride != 1`.
 
-> Implementation picks how many adjacent table regs are consumed (min 2). OOB rules as for `svperm.v`.
+> Implementation picks how many adjacent table regs are consumed (min 2). OOB handling follows RSV predicated writeback policy (see `xphmg.md`).
 
 ### 4.3 Semantic Notes
 
-* **Masking and ZMODE:** All PRMT/TBL/TBX instructions obey `SVPMASK*`; masked-off lanes follow `CAP.PREC.MODE.ZMODE` (merge vs. zero). The mask gates both halves of a pair destination.
+* **Predication:** PRMT/TBL/TBX instructions consume the effective predicate defined by the XPHMG predication model (see `xphmg.md`).
 * **Pair destinations:** `PAIR=1` encodings (zip/unzip) are legal only when `rd` is even and `SVDST.stride==1`; otherwise *illegal instruction*. Pair writes occur as in RSV widening ops: `rd` receives the low part, `rd^1` the high part.
 * **Index interpretation:** Indices are lane-wise unsigned values. For `svperm.v`/`svpermi2.v`/`svtbl.v`/`svtbx.v`, an index selects an element within the active source window(s). `svpermi2.v` uses the MSB of the index to select between `SVSRCA`/`SVSRCB`.
-* **Out-of-bounds (OOB) handling:** For indexed permutes and table lookups, OOB indices produce zero if `ZMODE=1`, else merge keeps the previous destination value. This matches the portable behavior used in RSV/TBL. Implementations may count OOB events non-architecturally.
+* **Out-of-bounds (OOB) handling:** For indexed permutes and table lookups, OOB indices are handled per RSV predicated writeback policy (see `xphmg.md`). Implementations may count OOB events non-architecturally.
 * **Structured patterns:** Reserved pattern encodings in `svshuffle.v` must be treated as *illegal instruction* if not implemented. Upper immediate bits are reserved and must be zero.
 * **Table span:** `svtbl.v`/`svtbx.v` interpret the table as the contiguous RSV source window starting at `rs1`, spanning VL elements of width `EFF_EW`. Implementations may consume additional adjacent registers but must not read beyond the architecturally visible window defined by VL/EW.
 * **FP payloads:** Permutations operating on FP elements preserve bit patterns; no NaN canonicalization or payload modification is performed by the permute itself. Numeric mode remains as latched by CAP.
@@ -352,7 +348,7 @@ svzip.lo rd0, ra, rb       # rd0=[a0 b0 a1 b1], rd1=[a2 b2 a3 b3]
 # idx in rI; table starts at t0 and spans the SVSRCA window
 svsetvl x0, 16
 svon.one
-svtbx.v rd, t0, rI         # in-range -> LUT; OOB -> keep rd (merge) or zero (ZMODE=1)
+svtbx.v rd, t0, rI         # in-range -> LUT; OOB -> keep rd per RSV predicated writeback policy (see `xphmg.md`)
 ```
 
 ---
@@ -367,24 +363,24 @@ The profile also defines a memory-oriented scatter-compact and gather-expand mec
 
 Conceptual model:
 
-* Register forms (`svcompress`, `svexpand`, `svpopcnt.pm`) operate entirely in registers under the active predicate mask, compacting or expanding surviving elements without changing VL or the predicate itself.
-* Memory forms (`svscat.cmp`, `svgath.exp`) stream survivors contiguously to or from memory under `CAP.XMEM` policy, using the current predicate to define survivors/slots and honoring FOF.
-* All forms share the current `SVPMASK*`; no explicit mask operand exists in the encoding. ZMODE defines how masked-off destinations are treated.
+* Register forms (`svcompress`, `svexpand`, `svpopcnt.pm`) operate entirely in registers under the effective predicate, compacting or expanding surviving elements without changing VL or predicate state.
+* Memory forms (`svscat.cmp`, `svgath.exp`) stream survivors contiguously to or from memory under `CAP.XMEM` policy, using the effective predicate to define survivors/slots and honoring FOF.
+* All forms consume the effective predicate implicitly; no explicit predicate operand exists in the encoding.
 
 ### 5.2 Register Encodings & Semantics
 
 | Mnemonic                              | Summary                                                                                                                  |
 | ------------------------------------- | ------------------------------------------------------------------------------------------------------------------------ |
-| `svcompress rd, ra, pmask`            | Packs lanes of `ra` where `pmask[i]=1` into `rd` contiguously from lane 0; masked-off lanes at tail are don't-care/zero. |
-| `svexpand   rd, ra, pmask`            | Inverse: spreads contiguous elements from `ra` into `rd` at lanes where mask=1; else zero/merge per ZMODE.               |
+| `svcompress rd, ra, pmask`            | Packs lanes of `ra` where `pmask[i]=1` into `rd` contiguously from lane 0; tail lanes follow base predicated writeback policy (see `xphmg.md`). |
+| `svexpand   rd, ra, pmask`            | Inverse: spreads contiguous elements from `ra` into `rd` at lanes where mask=1; others follow base predicated writeback policy (see `xphmg.md`). |
 | `svscat.cmp [base], ra, pmask, flags` | **Scatter-compact to memory**: survivors stored densely from `[base]` upward. `flags` may include domain/QoS hints.      |
 | `svgath.exp ra, [base], pmask, flags` | **Gather-expand from memory**: reads contiguous region into the lanes where mask=1.                                      |
 
-**Mask operand:** All `svcompress/svexpand/svscat.cmp/svgath.exp` consume the current `SVPMASK*`. The mask is **implicit** in the encoding (no extra register field).
+**Predicate operand:** All `svcompress/svexpand/svscat.cmp/svgath.exp` consume the current effective predicate from PMASK. The predicate is **implicit** in the encoding (no extra register field).
 
 **Notes**
 
-* `pmask` is the current `SVPMASK*`; the explicit operand is for mnemonic clarity (encoding may not need it).
+* `pmask` is the current effective predicate from PMASK; the explicit operand is for mnemonic clarity (encoding may not need it).
 * `svscat.cmp` and `svgath.exp` consume `CAP.XMEM.DOM` and hints; they may also use a small immediate `sprof_id` to pick a streaming profile.
 
 **Counts:** Many algorithms need the count of survivors. Provide:
@@ -396,7 +392,7 @@ Conceptual model:
 | funct7  | Mnemonic      | Type | Operands                 | Notes                                                      |
 | ------- | ------------- | ---- | ------------------------ | ---------------------------------------------------------- |
 | 0000000 | `svcompress`  | R    | `rd, rs1=a, rs2=ignored` | Packs lanes where predicate=1, dense from lane 0           |
-| 0000001 | `svexpand`    | R    | `rd, rs1=a, rs2=ignored` | Spreads `a` into lanes where predicate=1; others per ZMODE |
+| 0000001 | `svexpand`    | R    | `rd, rs1=a, rs2=ignored` | Spreads `a` into lanes where predicate=1; others per predicated writeback policy (see `xphmg.md`) |
 | 0000010 | `svpopcnt.pm` | R    | `rd, rs1=x0, rs2=x0`     | `rd -> popcount(predicate)` (0..VL)                        |
 
 ### 5.3 Memory Encodings & Semantics (scatter-compact / gather-expand)
@@ -416,9 +412,9 @@ Conceptual model:
 **A) Masked stream compaction in registers**
 
 ```asm
-# ra holds values; SVPMASK* marks survivors
+# ra holds values; effective predicate marks survivors
 svon.one
-svcompress rd, ra, SVPMASK
+svcompress rd, ra, pmask
 # rd now contains survivors densely packed from lane 0
 ```
 
@@ -427,26 +423,26 @@ svcompress rd, ra, SVPMASK
 ```asm
 # base in rB; domain/profile by CAP.XMEM.*
 svon.one
-svscat.cmp [rB], ra, SVPMASK, flags=0
+svscat.cmp [rB], ra, pmask, flags=0
 ```
 
 TODO-ELABORATE: Clarify FOF/retry details and survivor count reporting across register and memory forms.
 
 ### 5.5 Semantic Notes
 
-* **Predicate use:** The current `SVPMASK*` defines survivors. The mask is implicit; there is no encoded mask operand. Masked-off lanes in register forms leave non-survivor destinations per ZMODE (merge/zero). Masks are not mutated by these operations.
-* **Ordering and contiguity:** `svcompress` writes survivors starting at lane 0 in order of increasing lane index; lanes beyond the survivor count are architecturally don't-care/zero per ZMODE. `svexpand` consumes a dense source array from `rs1` and places elements only where the mask bit is 1; masked-off lanes follow ZMODE.
+* **Predicate use:** The effective predicate defines survivors. The predicate is implicit; there is no encoded predicate operand. Predicate state is not mutated by these operations.
+* **Ordering and contiguity:** `svcompress` writes survivors starting at lane 0 in order of increasing lane index; lanes beyond the survivor count follow base predicated writeback policy (see `xphmg.md`). `svexpand` consumes a dense source array from `rs1` and places elements only where the predicate bit is 1; other lanes follow the same policy.
 * **Population count:** `svpopcnt.pm` reports the popcount of the current predicate (0..VL) and does not modify predicate state. Return width/format follow the base RSV integer register rules.
 * **FOF and memory side effects:** `svscat.cmp`/`svgath.exp` follow RSV/`XPHMG_XMEM` fault-only-first rules. On first fault, no further memory accesses are performed; `SVFAULTI` captures the failing element index for retry. Partial stores/loads after the first fault are architecturally forbidden.
 * **Streaming profile selection:** `sprof_id` and hint bits (`nt_hint`, `lock_hint`) are interpreted per `CAP.XMEM.SPROF*`; unrecognized combinations are reserved and must behave as *illegal instruction* or ignore hints without altering architectural state (per base XMEM rules).
 * **Addressing and domains:** Base address is in `rs1`; domain/ordering/QoS are derived from `CAP.XMEM.DOM` and hint bits. Element size and stride follow `EFF_EW` and RSV scatter/gather rules; no profile-specific stride exists.
-* **Interaction with CAP:** Numeric/ZMODE behavior follows CAP; no additional saturation or rounding occurs in CEXP beyond what CAP defines for masked destinations and integer element moves.
+* **Interaction with CAP:** Numeric behavior follows CAP; no additional saturation or rounding occurs in CEXP beyond what CAP defines for integer element moves.
 
 ### 5.6 Notes for Implementers (Informative)
 
 * Implementations may use internal survivor-count generation to optimize `svcompress`/`svscat.cmp`; survivor count is not architecturally visible except via `svpopcnt.pm` or fault retry index.
 * Memory forms may fuse address generation for contiguous survivors but must still honor predicate gating and FOF termination. Writes/reads beyond the first fault are prohibited.
-* Toolchains should model `svpopcnt.pm` availability together with CEXP-M1 conformance; absence should be handled via software popcount of `SVPMASK*` if needed.
+* Toolchains should model `svpopcnt.pm` availability together with CEXP-M1 conformance; absence should be handled via software popcount of the effective predicate if needed.
 
 ---
 
@@ -558,11 +554,10 @@ Signedness, accumulator, and narrowing notes:
 * Signedness defaults are encoded by the mnemonic (`.s`/`.u`). If a mnemonic omits an explicit sign selector, the effective sign follows `CAP.PREC.MODE.UNS` as in the RSV base; this profile does not add alternate sign controls.
 * `svmla.wide.*` accumulates into the existing 2xEW value in `rd:rd^1`; accumulators are not implicitly zeroed and must be initialized by software.
 * `svnarrow.sat.*` interprets `rs2:rs1` as hi:lo of a 2xEW value and clamps to EW per the signedness variant. No rounding is performed unless a future `.rnd` variant is added.
-* Masking and ZMODE apply uniformly: masked-off lanes of widening/narrowing ops are handled per `CAP.PREC.MODE.ZMODE`.
 
 ### 6.5 Semantic Notes
 
-* **Masking and ZMODE:** All XRSVS instructions obey `SVPMASK*`; masked-off lanes follow `CAP.PREC.MODE.ZMODE` (merge vs. zero). The same predicate gates both halves of a pair destination.
+* **Predication:** All XRSVS instructions consume the effective predicate defined by the XPHMG predication model (see `xphmg.md`).
 * **Saturation flagging:** On any saturating operation that clamps, set `CAP.PREC.STAT.SAT_HIT`. No trap is raised. Non-clamping paths leave `SAT_HIT` unchanged.
 * **Signedness and element width:** Signed/unsigned variants interpret operands and saturation bounds per `EFF_PET`/`EFF_EW` from CAP. If the mnemonic encodes signedness, CAP.UNS does not override it; otherwise signedness follows CAP.UNS (implementation choice should be documented).
 * **Widening and narrowing:** Widening ops (`svmul.wide.*`, `svmla.wide.*`, `svshift.wide.s`) produce 2xEW results into `rd`/`rd^1` and require `rd` even and `SVDST.stride==1`; otherwise *illegal instruction*. Narrowing (`svnarrow.sat.*`) consumes a 2xEW pair (`rs2:rs1` as hi:lo) and saturates to EW.
@@ -612,14 +607,14 @@ This section provides **informative mappings** between common scalar-vector idio
 Examples and guidance:
 
 * **Permutation/shuffle idioms (XRSV-PRMT):** Use `svperm.v` for arbitrary indexed permutes within a window; `svpermi2.v` to merge from two windows under index MSB; `svshuffle.v` with predefined patterns for even/odd interleave or lane reversal; `svzip.*`/`svunzip.*` for interleave/de-interleave of two sources into a pair destination.
-* **Table lookup idioms (XRSV-PRMT):** Use `svtbl.v` for in-range table lookup across the active RSV window; use `svtbx.v` for lookup-or-keep behavior on out-of-range indices (merge or zero per ZMODE).
+* **Table lookup idioms (XRSV-PRMT):** Use `svtbl.v` for in-range table lookup across the active RSV window; use `svtbx.v` for lookup-or-keep behavior on out-of-range indices.
 * **Mask-based compaction/expansion (XRSV-CEXP):** Use `svcompress` to pack surviving lanes from a masked source contiguously; use `svexpand` to scatter a dense source back into masked positions; use `svpopcnt.pm` to obtain survivor counts.
 * **Compact scatter/gather (XRSV-CEXP):** Use `svscat.cmp` to stream survivors contiguously to memory; use `svgath.exp` to load a dense region into masked lanes. FOF and domain/hint behavior follow `XPHMG_XMEM`.
 * **Widening MAC and saturating arithmetic (XRSVS):** Use `svmul.wide.*`/`svmla.wide.*` for 2xEW products/accumulates with pair destinations; use `svnarrow.sat.*` to clamp back to EW; use `svadd.sat.*`, `svsub.sat.*`, `svabs.sat.s`, `svavg.rnd.*`, `svmin.*`, `svmax.*` for lane-wise saturated math.
 
 Notes:
 
-* All examples assume the active predicate (`SVPMASK*`) and ZMODE control masked lanes; adjust mask setup (`svsetvl`, `svon.*`, predicate ops) as needed before invoking profile instructions.
+* All examples assume the active predicate defined by the XPHMG predication model; adjust predicate setup (`svsetvl`, `svon.*`, predicate ops) as needed before invoking profile instructions.
 * For pair-destination forms, ensure `rd` is even and `SVDST.stride==1` to avoid *illegal instruction* traps.
 * When mapping known idioms, prefer the lowest conformance level that supplies the needed instructions (see Section 7) to ease portability across implementations.
 * TODO: Clarify any additional mappings with MTX/GFX/RT/ACCEL once those specifications stabilize.

@@ -3,7 +3,7 @@
 **Graphics and Texture Pipeline Extension**
 
 **Category:** Vendor Extension (`XPHMG_GFX`)
-**Version:** 0.1.0
+**Version:** 0.1.1
 **Author:** Pedro H. M. Garcia
 **License:** CC-BY-SA 4.0 (open specification)
 
@@ -17,11 +17,11 @@ The extension supplies primitives for texture and tensor sampling, interpolation
 
 `XPHMG_GFX` does not define a fixed pipeline. Coordinate transforms, control flow, batching, and memory orchestration are expressed explicitly using RSV, MTX, and XMEM. Software composes these primitives and enforces ordering with the fence and memory semantics defined later.
 
-All numeric and memory behavior is taken from the effective state of `XPHMG_CAP`. Precision, rounding, saturation, NaN policy, accumulator promotion, masking (ZMODE), and trap enable come from CAP effective state. Memory ordering, coherence domain, class selection, streaming detection, descriptor policy, and SVMEM behavior come from `CAP.XMEM.*` and `CAP.XMEM.SVM*`. Any divergence from CAP/XMEM semantics is non-conforming.
+All numeric and memory behavior is taken from the effective state of `XPHMG_CAP`. Precision, rounding, saturation, NaN policy, accumulator promotion, masking (ZMODE), and trap enable come from CAP effective state. Memory ordering, coherence domain, class selection, streaming detection, descriptor policy, and SVMEM behavior come from `CAP.XMEM.*` and `CAP.XMEM.SVM*`. Any divergence from CAP/XMEM semantics is non-conforming. Effective predication consumed by GFX MUST be sourced only from `XPHMG_PMASK` as defined in `xphmg.md`; GFX does not define internal mask sources.
 
-Architectural visibility: results of GFX operations, predicate masks, and CSR-visible status bits are architectural. Internal caching, interpolation microarchitecture, or internal promotion beyond CAP requirements is allowed only if architecturally visible results and exception signaling remain identical. NOTE: Implementations MAY promote internally for quality provided architectural results and traps/stickies are unchanged.
+Architectural visibility: results of GFX operations, predicate masks (PMASK bank state), and CSR-visible status bits are architectural. Internal caching, interpolation microarchitecture, or internal promotion beyond CAP requirements is allowed only if architecturally visible results and exception signaling remain identical. NOTE: Implementations MAY promote internally for quality provided architectural results and traps/stickies are unchanged.
 
-Interactions: GFX instructions rely on RSV window conventions for operands and results, on MTX for transforms, on CAP for numeric semantics, and on XMEM for memory semantics. Optional RT use is permitted. Implementations MUST snapshot CAP/XMEM state at instruction boundaries as defined in the numeric and memory model; mid-instruction CSR changes MUST NOT be observed. No GFX instruction modifies CAP state.
+Interactions: GFX instructions rely on RSV window conventions for operands and results, on PMASK for predication, on MTX for transforms, on CAP for numeric semantics, and on XMEM for memory semantics. Optional RT use is permitted. Implementations MUST snapshot CAP/XMEM state at instruction boundaries as defined in the numeric and memory model; mid-instruction CSR changes MUST NOT be observed. No GFX instruction modifies CAP state.
 
 ---
 
@@ -32,7 +32,7 @@ This section states the intended qualities, dependencies, and limits of `XPHMG_G
 - Minimal instruction footprint: single instructions perform multi-step work (fetch, filter, convert) to reduce code size and dispatch, while remaining compatible with CAP precision and memory rules.
 - Unified numeric control via `CAP.PREC.*`: all numeric policy (precision selection, accumulator width, rounding, saturation, NaN handling, ZMODE, trap enable) is inherited from CAP effective state; no GFX-specific numeric policy exists.
 - CAP-driven memory defaults: coherence domain, memory class selection, streaming profiles, descriptor policy, and SVMEM behavior come from `CAP.XMEM.*` / `CAP.XMEM.SVM*`, consistent with RSV, MTX, and RT.
-- LMEM-first execution with early culling: LMEM is the preferred working-set location; early elimination uses RSV predicates and culling to reduce external traffic.
+- LMEM-first execution with early culling: LMEM is the preferred working-set location; early elimination uses effective predication (PMASK) and culling to reduce external traffic.
 - Predictable DMA/fence alignment with XMEM: ordering and visibility use `GFX.FENCE` and XMEM semantics so software can reason about completion and coherence across sampling, shading, and Z.
 - Optional feature hooks: programmable filters, LUT color transforms, and hierarchical Z are provided, but no fixed pipeline stages are mandated; software composes them explicitly with RSV/MTX/XMEM control.
 
@@ -47,7 +47,8 @@ This section lists the architectural prerequisites for a conforming `XPHMG_GFX` 
 **Mandatory:** These extensions and their contracts MUST be present in the same privilege context that executes GFX instructions.
 
 - `XPHMG_CAP`: numeric and memory policy (`CAP.PREC.*`, `CAP.XMEM.*`, `CAP.XMEM.SVM*`). All GFX precision selection, accumulation, NaN policy, ZMODE, exception enables, coherence domain, memory class selection, streaming detection, descriptor defaults, and SVMEM behavior are inherited from CAP effective state.
-- `XPHMG_RSV`: Simple Vector windows and masks. Operand/result placement, predicate handling, and masked-lane behavior rely on RSV windows and CAP ZMODE semantics.
+- `XPHMG_PMASK`: Predicate state and banked predication. GFX consumes effective predication from PMASK and does not define predicate storage.
+- `XPHMG_RSV`: Simple Vector windows. Operand/result placement uses RSV windows; predication is sourced from PMASK and masked-lane writeback follows CAP ZMODE.
 - `XPHMG_MTX`: matrix multiply/transform ops. Culling and interpolation flows assume MTX is available for coordinate/vertex transforms when invoked by software.
 - `XPHMG_XMEM`: DMA/LDS/descriptor plumbing via CAP state. All GFX memory accesses (including descriptor reads) rely on XMEM semantics for coherence, streaming profiles, compression defaults, and descriptor policy.
 
@@ -55,9 +56,9 @@ This section lists the architectural prerequisites for a conforming `XPHMG_GFX` 
 
 `XPHMG_GFX` does not restate CAP fields; it consumes the effective CAP state latched at the instruction boundary.
 
-Profile assumptions: CAP, RSV, MTX, and XMEM CSRs are expected to be accessible and effective in the same privilege level as GFX CSRs. If the CAP window `0x7C0-0x7FF` is reserved, GFX CSRs MUST be placed in a non-overlapping vendor window while preserving field semantics.
+Profile assumptions: CAP, PMASK, RSV, MTX, and XMEM CSRs are expected to be accessible and effective in the same privilege level as GFX CSRs. If the CAP window `0x7C0-0x7FF` is reserved, GFX CSRs MUST be placed in a non-overlapping vendor window while preserving field semantics.
 
-Architectural visibility: dependencies on CAP/RSV/MTX/XMEM are architectural. Optional RT or MEMCTL offload does not change GFX-defined results; such components only provide additional software-managed control.
+Architectural visibility: dependencies on CAP/PMASK/RSV/MTX/XMEM are architectural. Optional RT or MEMCTL offload does not change GFX-defined results; such components only provide additional software-managed control.
 
 TODO: Document privilege/profile assumptions and CSR window placement/remap policy.
 TODO: Specify CSR window placement/remap policy per profile.
@@ -135,7 +136,7 @@ This section summarizes programming conventions for `XPHMG_GFX`: how operands ar
 
 Descriptor versus CSR precedence: When a descriptor pointer and CSRs provide equivalent fields (base, pitch, dimensions, format, wrap, border), the descriptor overrides the corresponding CSRs for that instruction. Fields not present in the descriptor fall back to CSRs, which are interpreted under CAP/XMEM policy. This precedence is architectural. NOTE: Malformed descriptor content or CAP-inconsistent settings trigger the exception behavior defined in the numeric/memory model and exceptions sections. TODO: Define platform-specific descriptor validation requirements if needed.
 
-RSV windows and masks: GFX instructions consume and produce RSV windows as listed below. Masked-lane behavior follows CAP ZMODE (merge or zero). Predicate updates, when supported, are architectural. Software MUST ensure window contents conform to CAP precision and formatting expectations before invoking GFX instructions.
+RSV windows: GFX instructions consume and produce RSV windows as listed below. Effective predication is sourced from PMASK; masked-lane writeback follows CAP ZMODE (merge or zero). Predicate updates, when supported, write the selected PMASK bank and are architectural. Software MUST ensure window contents conform to CAP precision and formatting expectations before invoking GFX instructions.
 
 ### 5.1 Sampling & Coordinate Conventions
 
@@ -167,17 +168,17 @@ If `rs1` points to `TextureDesc`, it overrides equivalent CSRs for that instruct
 
 ### 5.2 RSV Window Conventions
 
-This subsection assigns RSV windows to operands and results. The mapping is architectural. Masked lanes follow CAP ZMODE for all architecturally visible outputs (register state or memory writes).
+This subsection assigns RSV windows to operands and results; predicate outputs, when specified, update PMASK banks and are not RSV window state. The mapping is architectural. Predicate-false lanes follow CAP ZMODE for all architecturally visible outputs (register state or memory writes).
 
 | Instruction  | Input Windows      | Output Windows | Notes                    |
 | ------------ | ------------------ | -------------- | ------------------------ |
 | `GFX.SAMPLE` | `RSV a0..a1` (u,v) | `RSV r0..r3`   | RGBA sample              |
 | `GFX.INTERP` | `r0..r3`, `a2..a3` | `r4..r7`       | Bilinear/perspective     |
 | `GFX.SHADE`  | `r*`, `n*`, `l*`   | `r*`           | Lighting                 |
-| `GFX.ZTEST`  | `rZ`               | mask           | May update RSV predicate |
+| `GFX.ZTEST`  | `rZ`               | PMASK bank     | Predicate result (optional update) |
 | `GFX.LUT*`   | `rRGB`             | `rRGB`         | In-place color transform |
 
-ZMODE from CAP applies to masked lanes for all operations.
+ZMODE from CAP applies to predicate-false lanes for all operations (see section 6.3).
 
 ---
 
@@ -192,7 +193,7 @@ All GFX units consume only the effective state from `CAP.PREC.*`. The following 
 - **PET/EW/ACCW selection:** Derived from `CAP.PREC.MODE/ALT` at the instruction boundary. A per-op `ppp` requests a mapping; the effective PET/EW/ACCW is resolved under CAP policy. If the requested mapping cannot be realized, the operation traps as Unsupported and sets `CAP.PREC.STAT.UNSUP_FMT`.
 - **Rounding, saturation, quantization, NaN, ZMODE, SAE, traps:** Follow CAP effective state (`CAP.PREC.STAT`, `CAP.PREC.EXC.EN`). No GFX-specific numeric policy exists.
 - **Accumulator policy:** If CAP effective ACCW indicates promotion (e.g., ACCW=FP32 or auto), GFX units MUST promote internal accumulation accordingly. If a fixed ACCW is insufficient, software MUST select a suitable CAP mode; GFX does not override ACCW.
-- **Masked lanes:** CAP ZMODE controls masked-off behavior (`merge` vs `zero`) for all architecturally visible outputs (RSV writes, memory writes, predicate updates).
+- **Masked lanes:** Predicate-false lanes are defined by PMASK effective predication; writeback is governed by `CAP.PREC.MODE.ZMODE` (merge vs zero) as specified in section 6.3.
 - **Exceptions and stickies:** FP/precision stickies are reported in `CAP.PREC.EXC.ST` and `CAP.PREC.STAT`; traps occur only if enabled and effective SAE is 0. NaN propagation/squash follows `CAP.PREC.MODE.NAN_POL`. Color-space conversion MUST honor CAP NaN/FTZ/quantization rules.
 - **Internal promotion latitude:** Implementations MAY promote internally (e.g., to FP32) provided outputs and exception signaling match CAP-defined results. Any divergence is non-conforming.
 
@@ -209,7 +210,30 @@ All GFX memory accesses (texture fetch, Z/LUT/gather loads/stores, descriptor re
 - **SVMEM behavior:** Use `CAP.XMEM.SVM*` rules for all indexed gather/scatter paths, including masked-lane handling and FOF behavior.
 - **Descriptor scope:** Descriptors override only fields they contain. Unspecified fields fall back to CAP defaults. Invalid or unsupported descriptor combinations MUST trap or set status per CAP/XMEM rules.
 
-### 6.3 State Latching at Instruction Boundary
+Predicate-false lanes MUST NOT issue memory accesses for any GFX operation that touches memory; this rule is defined by `xphmg_xmem.md` and applies uniformly to vertex/attribute fetch, texture sampling, LUT/Z/gather access, descriptor reads, and any buffer/image/atomic paths.
+
+### 6.3 Predication and Masked Execution (PMASK-Driven)
+
+GFX consumes only the effective predication defined by PMASK:
+
+```
+pred[i] = PMASK.bank[pbank_eff][i]
+```
+
+`pbank_eff` is selected by an instruction field where present, or by an existing architectural predication prefix; if no selection is made, `pbank=0` is implied and behaves as a virtual ALL-ONES bank.
+
+GFX MUST NOT redefine PMASK, introduce GFX-specific predicate CSRs, or define alternative predication modes; it is strictly a consumer of PMASK (predication), CAP (writeback policy), and XMEM (memory semantics) as defined in `xphmg.md`.
+
+Predicate-false lanes or fragments (`pred[i]=0`) MUST NOT execute, MUST NOT read attributes, vertices, parameters, or interpolants, MUST NOT raise exceptions, and MUST NOT produce side-effects.
+
+Writeback for predicate-false lanes is governed exclusively by `CAP.PREC.MODE.ZMODE`:
+- `merge`: preserve the previous destination value.
+- `zero`: write architectural zero.
+GFX MUST NOT define any other writeback policy under predication.
+
+Predicate-producing GFX operations, when specified by the instruction, write results to `PMASK.bank[pbank_eff]`. Writes to `pbank=0` have no effect.
+
+### 6.4 State Latching at Instruction Boundary
 
 Each GFX instruction MUST snapshot at decode:
 
@@ -262,11 +286,11 @@ The table below summarizes encoding patterns for all GFX instructions, including
 
 ## 8. Instruction Semantics
 
-This section defines normative semantics for all `XPHMG_GFX` instructions. Each instruction assumes the numeric and memory contract from section 6, descriptor/CSR precedence from section 5, and CAP/ZMODE masking behavior. Implementation latitude is limited to microarchitectural choices that do not alter architecturally visible results, masks, or exception signaling. Operand/result placement follows the RSV window conventions in section 5; all memory accesses follow CAP.XMEM rules.
+This section defines normative semantics for all `XPHMG_GFX` instructions. Each instruction assumes the numeric and memory contract from section 6, descriptor/CSR precedence from section 5, and PMASK-sourced predication with CAP ZMODE writeback (section 6.3). Implementation latitude is limited to microarchitectural choices that do not alter architecturally visible results, masks, or exception signaling. Operand/result placement follows the RSV window conventions in section 5; all memory accesses follow CAP.XMEM rules.
 
 ### 8.1 Sampling and Gather
 
-These instructions fetch and optionally filter samples from textures or tensors. Coordinates, wrapping, filtering, and color-space controls come from immediates and GFX CSRs or descriptors; numeric interpretation and memory policy are defined by CAP/XMEM. Masked lanes follow CAP ZMODE for all outputs, including partial gathers.
+These instructions fetch and optionally filter samples from textures or tensors. Coordinates, wrapping, filtering, and color-space controls come from immediates and GFX CSRs or descriptors; numeric interpretation and memory policy are defined by CAP/XMEM. Predicate-false lanes are suppressed per section 6.3; writeback follows CAP ZMODE for all outputs, including partial gathers.
 
 #### `GFX.SAMPLE` -- Texture/tensor sampling
 
@@ -307,7 +331,7 @@ Each tap entry is `{du, dv, weight}` with PET/EW from CAP. For integer PET, `du/
 
 ### 8.2 Interpolation
 
-Interpolation combines nearby samples based on fractional coordinates. All arithmetic, including optional bias and perspective division, follows CAP numeric policy. Inputs come from RSV; outputs are written to RSV and are subject to CAP ZMODE for masked lanes.
+Interpolation combines nearby samples based on fractional coordinates. All arithmetic, including optional bias and perspective division, follows CAP numeric policy. Inputs come from RSV; predicate-false lanes are suppressed per section 6.3 and writeback follows CAP ZMODE.
 
 #### `GFX.INTERP` -- Bilinear/perspective interpolation
 
@@ -326,7 +350,7 @@ Inputs and outputs follow CAP precision; accumulation uses CAP effective ACCW wi
 
 ### 8.3 Shading
 
-Shading operations consume RSV source windows (including optional normal/light windows) and produce RSV results. Numeric behavior, including normalization and dot products, follows CAP effective state; masked-lane handling follows CAP ZMODE.
+Shading operations consume RSV source windows (including optional normal/light windows) and produce RSV results. Numeric behavior, including normalization and dot products, follows CAP effective state; predicate-false lanes are suppressed per section 6.3 and writeback follows CAP ZMODE.
 
 #### `GFX.SHADE` -- Arithmetic shading / lighting combine
 
@@ -343,7 +367,7 @@ ppp OO L N | xxxxx | 100 | xxxxx | 00101011
 
 ### 8.4 Depth/Z Pipeline
 
-Depth test, depth write, and hierarchical-Z build operations interact with Z buffers in LMEM/DRAM using CAP.XMEM semantics and CAP precision. Atomicity, ordering, and masked-lane handling are defined per instruction and CAP policy.
+Depth test, depth write, and hierarchical-Z build operations interact with Z buffers in LMEM/DRAM using CAP.XMEM semantics and CAP precision. Atomicity and ordering are defined per instruction and CAP/XMEM policy; predicate-false lanes are suppressed per section 6.3.
 
 #### `GFX.ZTEST` -- Depth comparison
 
@@ -356,7 +380,7 @@ ppp w e m | xxxxx | 101 | xxxxx | 00101011
 - `m`: mask update policy (0=replace, 1=mask&=pass).
 
 **Semantics:**  
-Compares `z_in` from RSV or LMEM with `Zbuffer` (per `GFXZCFG.CMP`). Writes new Z if passed and `w=1`. Returns per-lane mask of survivors; optionally updates RSV predicate. Numeric format and NaN handling follow CAP effective precision and `CAP.PREC.MODE.NAN_POL`.
+Compares `z_in` from RSV or LMEM with `Zbuffer` (per `GFXZCFG.CMP`). Writes new Z if passed and `w=1`. Returns per-lane predicate result; optionally updates the selected PMASK bank. Numeric format and NaN handling follow CAP effective precision and `CAP.PREC.MODE.NAN_POL`.
 
 **Atomicity & ordering:**  
 If `w=1`, `GFX.ZTEST` performs a compare-and-conditional-write that is atomic per pixel within the core. Visibility to LMEM/DRAM follows the fence scope (see `GFX.FENCE`). Cross-core atomicity is guaranteed only when the Z buffer resides in LMEM with single-writer ownership or when the fabric provides atomic writes for the configured width.
@@ -384,7 +408,7 @@ Reduces Zbuffer tiles into a coarser hierarchy level in LMEM or DRAM, producing 
 
 ### 8.5 Color/LUT
 
-LUT-based color transforms use CAP.XMEM for table access and CAP numeric rules for conversion/interpolation. Masked-lane behavior follows CAP ZMODE for in-place transforms.
+LUT-based color transforms use CAP.XMEM for table access and CAP numeric rules for conversion/interpolation. Predicate-false lanes are suppressed per section 6.3; writeback follows CAP ZMODE for in-place transforms.
 
 #### `GFX.LUT1D` / `GFX.LUT3D` -- Color LUT transform
 
@@ -426,7 +450,7 @@ Ensures completion/visibility across selected units.
 
 ### 8.7 Culling/Visibility Instructions
 
-Per-lane visibility and compaction operations consume coordinates or bounding volumes from RSV, apply clip tests using GFX CSRs and CAP numeric rules, and update predicates or memory according to CAP.ZMODE and XMEM semantics. Mask updates are architecturally visible; implementations MUST preserve specified behavior.
+Per-lane visibility and compaction operations consume coordinates or bounding volumes from RSV, apply clip tests using GFX CSRs and CAP numeric rules, and update PMASK or memory according to section 6.3 and XMEM semantics. Mask updates are architecturally visible; implementations MUST preserve specified behavior.
 
 #### `GFX.CULL.PLANE`
 
@@ -459,7 +483,7 @@ AABB vs frustum; transforms 8 corners via `MTX.MUL` if `f=1`.
 op inv _ _ | 00000 | 000 | 00000 | 00101011
 ```
 
-Combines predicate masks (`AND/OR/XOR/COPY`).
+Combines PMASK predicate masks (`AND/OR/XOR/COPY`).
 
 #### `GFX.CULL.COMPACT`
 
@@ -467,7 +491,7 @@ Combines predicate masks (`AND/OR/XOR/COPY`).
 mm aa rr cc | xxxxx | 000 | xxxxx | 00101011
 ```
 
-Stream compaction; writes only surviving lanes to LMEM (indices and/or attributes). If `cc=1`, returns count in `rd`. Masked-lane behavior follows CAP ZMODE.
+Stream compaction; writes only surviving lanes to LMEM (indices and/or attributes). If `cc=1`, returns count in `rd`. Predicate-false lanes are suppressed per section 6.3; writeback follows CAP ZMODE.
 
 **Clip W handling:** with `z=1`, lanes with `!isfinite(w)` or `w <= GFXCLIP_EPS` are rejected before plane tests.
 
