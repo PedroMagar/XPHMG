@@ -17,6 +17,8 @@ The extension supplies primitives for texture and tensor sampling, interpolation
 
 `XPHMG_GFX` does not define a fixed pipeline. Coordinate transforms, control flow, batching, and memory orchestration are expressed explicitly using RSV, MTX, and XMEM. Software composes these primitives and enforces ordering with the fence and memory semantics defined later.
 
+Mesh-style rendering is a software pattern expressed as RSV kernels that orchestrate MTX/XMEM control flow and data movement. `XPHMG_GFX` provides visibility/culling, stream compaction, sampling/interpolation/shading helpers, and Z/HZ helpers only. It does not define a mesh execution stage, workgroup model, execution width, or scheduling; those responsibilities belong to RSV + PMASK + XMEM.
+
 All numeric and memory behavior is taken from the effective state of `XPHMG_CAP`. Precision, rounding, saturation, NaN policy, accumulator promotion, masking (ZMODE), and trap enable come from CAP effective state. Memory ordering, coherence domain, class selection, streaming detection, descriptor policy, and SVMEM behavior come from `CAP.XMEM.*` and `CAP.XMEM.SVM*`. Any divergence from CAP/XMEM semantics is non-conforming. Effective predication consumed by GFX MUST be sourced only from `XPHMG_PMASK` as defined in `xphmg.md`; GFX does not define internal mask sources.
 
 Architectural visibility: results of GFX operations, predicate masks (PMASK bank state), and CSR-visible status bits are architectural. Internal caching, interpolation microarchitecture, or internal promotion beyond CAP requirements is allowed only if architecturally visible results and exception signaling remain identical. NOTE: Implementations MAY promote internally for quality provided architectural results and traps/stickies are unchanged.
@@ -35,6 +37,7 @@ This section states the intended qualities, dependencies, and limits of `XPHMG_G
 - LMEM-first execution with early culling: LMEM is the preferred working-set location; early elimination uses effective predication (PMASK) and culling to reduce external traffic.
 - Predictable DMA/fence alignment with XMEM: ordering and visibility use `GFX.FENCE` and XMEM semantics so software can reason about completion and coherence across sampling, shading, and Z.
 - Optional feature hooks: programmable filters, LUT color transforms, and hierarchical Z are provided, but no fixed pipeline stages are mandated; software composes them explicitly with RSV/MTX/XMEM control.
+- Mesh-style kernels are software-defined RSV instruction streams; GFX does not define or own mesh execution, workgroup scheduling, or lane orchestration.
 
 Architectural guarantees are limited to results, masks, and exceptions defined by the instruction and CSR semantics under CAP/XMEM. Microarchitectural optimizations that do not change architectural results (e.g., internal promotion) are allowed. Rasterization, triangle setup, and fixed-function blending are out of scope and, if needed, must be built in software with the provided primitives.
 
@@ -177,6 +180,7 @@ This subsection assigns RSV windows to operands and results; predicate outputs, 
 | `GFX.SHADE`  | `r*`, `n*`, `l*`   | `r*`           | Lighting                 |
 | `GFX.ZTEST`  | `rZ`               | PMASK bank     | Predicate result (optional update) |
 | `GFX.LUT*`   | `rRGB`             | `rRGB`         | In-place color transform |
+| `GFX.CULL.COMPACT` | `r0..r7`     | memory stream, optional `rd` | `r0`=prim_id, `r1..r3`=attr refs, `r4..r6`=payload |
 
 ZMODE from CAP applies to predicate-false lanes for all operations (see section 6.3).
 
@@ -491,7 +495,28 @@ Combines PMASK predicate masks (`AND/OR/XOR/COPY`).
 mm aa rr cc | xxxxx | 000 | xxxxx | 00101011
 ```
 
-Stream compaction; writes only surviving lanes to LMEM (indices and/or attributes). If `cc=1`, returns count in `rd`. Predicate-false lanes are suppressed per section 6.3; writeback follows CAP ZMODE.
+Stream compaction; writes only surviving lanes to LMEM/DRAM as a primitive stream. `rs1` supplies the byte address of the output stream base. The effective visibility mask is the current PMASK mask after any preceding culling operations; each surviving lane emits one record. All stream writes follow CAP.XMEM semantics.
+
+**Field controls:**
+- `mm` (record format): `00` selects PSR-v0 (defined below). Other values are reserved and MUST trap as *Illegal Instruction*.
+- `aa` (attribute references): number of attribute-reference words to emit (0..3).
+- `rr` (payload words): number of inline payload words to emit (0..3).
+- `cc` (count return): `01` writes the emitted record count to `rd`; `00` leaves `rd` unmodified. Other values are reserved and MUST trap as *Illegal Instruction*.
+
+**Primitive Stream Record (PSR-v0, `mm=00`) layout:**  
+Records are written as a contiguous sequence of XLEN-sized words in little-endian memory order. The record word count is `1 + aa + rr`.
+
+- `word0` = `prim_id` from `r0` (per-lane).
+- `word1..wordA` = `attr_ref[i]` from `r(1+i)` for `i=0..A-1`, where `A=aa`.
+- `word(1+A)..word(1+A+R-1)` = `payload[i]` from `r(4+i)` for `i=0..R-1`, where `R=rr`.
+- `r7` is reserved for future use and is ignored by `GFX.CULL.COMPACT` v0.1.
+- `rs1` is an input pointer and is not modified.
+
+Attribute references and payload words are architecturally opaque to GFX; their interpretation is defined by software and by any downstream consumer.
+If multiple producers write to a shared stream, software MUST provide disjoint output ranges (e.g., per-workgroup base offsets), or otherwise serialize; the instruction provides no inter-wave allocation.
+
+**Ordering and alignment guarantees:**  
+If `rs1` is XLEN-aligned, each record begins at an XLEN-aligned address. Records are written in ascending lane index order (lane 0..VL-1) for surviving lanes only, and are tightly packed with no padding or terminator. If `cc=01`, the returned count equals the number of records emitted. Predicate-false lanes are suppressed per section 6.3; writeback follows CAP ZMODE.
 
 **Clip W handling:** with `z=1`, lanes with `!isfinite(w)` or `w <= GFXCLIP_EPS` are rejected before plane tests.
 
@@ -518,7 +543,23 @@ The sequence below illustrates a common ordering for 2D/3D workloads. It MAY be 
 
 Architectural considerations: Early-Z MAY reduce work but MUST NOT change results relative to a late Z test when CAP precision and `GFXZCFG` settings are applied consistently. Fences are required to guarantee visibility to LMEM/DRAM for later stages or peers. If descriptors are used, they MUST be populated before issuing dependent GFX instructions and follow CAP.XMEM ordering.
 
-### 9.2 Wavefront Queues & Hierarchical-Z (Informative)
+### 9.2 Mesh-Style Primitive Emission Flow (Informative)
+
+The sequence below illustrates a mesh-style workflow expressed as an RSV kernel. It is informative and does not define a fixed pipeline or mesh stage.
+
+```
+1. Workgroup setup and input fetch: RSV/XMEM gather meshlet or primitive inputs; RSV controls execution width and lane distribution.
+2. Geometry generation and transform: MTX and RSV compute positions and bounds in clip space; PMASK predication gates lane activity.
+3. Visibility/culling: GFX.CULL.PLANE/FRUSTUM/AABB update PMASK; GFX.CULL.COMPOSE combines masks as needed.
+4. Emission prep: RSV packs `r0..r6` with prim_id, attribute references, and optional payload per lane (r7 reserved).
+5. Stream emission: GFX.CULL.COMPACT writes PSR-v0 records to LMEM/DRAM; `cc` optionally returns the emitted count.
+6. Downstream consumption: software or other domains consume the stream; GFX.SAMPLE/INTERP/SHADE/ZTEST may be used as helpers. Rasterization remains out of scope for GFX.
+7. Ordering: use GFX.FENCE and XMEM ordering to sequence producers/consumers across LMEM/DRAM.
+```
+
+Division of responsibility: RSV/MTX/XMEM own control flow, workgroup orchestration, geometry generation, and memory traversal. PMASK owns predication. GFX provides visibility tests, compaction, and shading/sampling helpers only.
+
+### 9.3 Wavefront Queues & Hierarchical-Z (Informative)
 
 Wavefront queues: Software-managed queues MAY be implemented as LMEM ring buffers. Survivors are enqueued with `GFX.CULL.COMPACT`. Queue accesses MUST follow CAP.XMEM class, streaming profile, coherence domain, and compression defaults unless overridden by descriptor policy. Ordering and visibility across producers/consumers MUST be enforced with fences appropriate to the queue’s memory class and domain.
 

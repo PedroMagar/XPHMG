@@ -463,6 +463,7 @@ imm[0]   -> ZMODE (1 = zeroing, 0 = merge)
 
 * RSV permutations may reorganize vertex/pixel tensors for texture or shading ops; GFX texture gather must behave identically to RSV gather with the same CAP.XMEM state.
 * Streaming and coherence defaults remain governed by XMEM; RSV must not introduce domain-specific memory semantics.
+* Mesh-style primitive emission is a software-kernel pattern: RSV provides control flow and workgroup orchestration while GFX provides visibility/compaction helpers; no GFX-owned mesh execution model is defined.
 
 ### 10.6 RSV <-> Scalar ALU
 

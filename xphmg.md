@@ -277,6 +277,7 @@ PMASK defines predicate state; CAP defines writeback and numeric policy.
 **Invariants (informative):**
 - Precision and memory policy are inherited from CAP/XMEM; GFX must not introduce alternate numeric/memory rules.
 - Vectorization typically relies on RSV; gather/scatter and masking follow CAP/XMEM and RSV semantics.
+- Mesh-style rendering is a software pattern composed with RSV/MTX/XMEM; GFX does not define a mesh execution stage or workgroup model.
 
 **Notes:** Implementations may map sampling/interpolation to LDS-first, class-aware paths; layout shuffles/visibility compaction may use RSV profiles.
 
