@@ -162,8 +162,24 @@ CAP defines the **policy invariants** that bind predication across domains (writ
 
 NOTE: CAP defines the policy above; the selecting/encoding of `pbank` and any predicate-producing instructions are defined by the consuming extensions (e.g., RSV/RT/GFX) and by `XPHMG_PMASK` itself.
 
+### 2.4 Predication and SIMT relationship (informative):
 
-### 2.4 Cross-Domain Execution, Masks, Exceptions
+XPHMG intentionally separates **predicate state**, **execution width**, and
+**scheduling strategy**.
+
+- `XPHMG_PMASK` defines architectural predicate state.
+- RSV defines how vectors consume predicates.
+- `CAP.SIMT.*` only describes whether hardware may exploit convergent predicates
+  to schedule execution in a SIMT-like fashion.
+
+As a result, the same program can execute correctly on:
+- pure SIMD hardware,
+- scalar + vector hardware,
+- hybrid SIMD/SIMT hardware,
+
+without requiring code changes or alternate instruction encodings.
+
+### 2.5 Cross-Domain Execution, Masks, Exceptions
 
 NOTE: Normative cross-domain rules are consolidated in Section 5.
 
@@ -217,7 +233,8 @@ To avoid collisions between XPHMG sub-extensions, the vendor CSR window `0x7C0-0
 | Range         | Owner / Block         | Contents                                                    |
 | ------------- | --------------------- | ----------------------------------------------------------- |
 | `0x7C0-0x7CF` | `XPHMG_CAP` (core)    | ID, version, global flags, profiles, features, tiers, hints |
-| `0x7D0-0x7D7` | `XPHMG_CAP.PREC`      | Numeric/precision policy & FP exception CSRs                |
+| `0x7D0-0x7D5` | `XPHMG_CAP.PREC`      | Numeric/precision policy & FP exception CSRs                |
+| `0x7D6-0x7D7` | `XPHMG_CAP.SIMT`      | SIMT/wavefront discovery (RO, non-binding)                  |
 | `0x7D8-0x7DF` | `XPHMG_CAP.PREC.CAP`  | Precision/format capability descriptors (see 4.5)           |
 | `0x7E0-0x7EF` | `XPHMG_CAP.XMEM`      | Memory / LDS / streaming / descriptor policy                |
 | `0x7F0-0x7F7` | `XPHMG_CAP.XMEM.SVM`  | Indexed gather/scatter (SVMEM) configuration                |
@@ -294,10 +311,28 @@ These CSRs expose non-binding feature discovery bits for software capability pro
 | `CAP.FEAT0`     | 0x7C5 | RO     | General features (bindless, OOO mem, RT, etc.).                      |
 | `CAP.FEAT1`     | 0x7C6 | RO     | Sync/barrier features, PMU presence.                                 |
 | `CAP.PMASK.CAP` | 0x7C7 | RO     | Predicate-mask discovery (presence, bank count, bank0 ALL-ONES rule).|
+| `CAP.SIMT.CAP`  | 0x7D6 | RO     | SIMT capability discovery (presence + wave width range)              |
+| `CAP.SIMT.LIM`  | 0x7D7 | RO     | Advisory limits (max waves / implementation guidance)                |
 
 **Informative:** Feature bits group optional capabilities; they do not alter architectural behavior without explicit enablement elsewhere.
 
 `CAP.FEAT0` advertises optional capabilities for software tuning. Bits are descriptive, non-binding, and stable after reset unless `RUNTIME_MUTABLE=1` explicitly permits variation. Clearing a bit does not forbid equivalent functionality provided through another mechanism.
+
+**`CAP.SIMT.CAP`** (RO):
+Describes whether the implementation provides SIMT-style execution support.
+
+Suggested fields:
+- `SIMT_PRESENT`: SIMT-style execution supported.
+- `WAVE_MIN`: Minimum supported wavefront width.
+- `WAVE_MAX`: Maximum supported wavefront width.
+
+**`CAP.SIMT.LIM`** (RO):
+Advisory limits and guidance for SIMT scheduling, such as:
+- preferred wave size,
+- maximum concurrent waves per compute unit,
+- implementation-specific occupancy hints.
+
+These values are advisory only and MUST NOT be treated as guarantees.
 
 Suggested mapping (non-exhaustive):
 
@@ -331,6 +366,38 @@ This CSR is descriptive only; it does not enable predication by itself.
 - bits[XLEN-1:5] reserved, read as zero.
 
 TODO-ELABORATE: Define FEAT0 bit positions and add missing FEAT1 table.
+
+##### 4.2.1.2 SIMT / Wavefront Discovery (`CAP.SIMT.*`) (RO, non-binding)
+
+`CAP.SIMT.*` provides **descriptive discovery** of optional SIMT-style execution
+capabilities. These CSRs do **not** enable SIMT execution, do **not** change the
+architectural execution model, and do **not** introduce implicit control flow.
+
+SIMT support, when present, is an **implementation strategy**, not an architectural
+requirement of XPHMG.
+
+**Normative clarifications:**
+1. The presence of `CAP.SIMT.CAP` or `CAP.SIMT.LIM` MUST NOT alter the semantics of
+   RSV, PMASK, or any other XPHMG domain.
+2. All XPHMG programs MUST execute correctly on implementations where
+   `CAP.SIMT.CAP = 0`.
+3. No instruction in any XPHMG extension is permitted to assume SIMT execution
+   implicitly.
+
+**Conceptual model (informative):**
+SIMT is treated as a *hardware scheduling and grouping optimization* layered on top
+of the existing explicit predication and vector execution model. When implemented,
+hardware MAY:
+- group lanes into wavefronts,
+- share instruction issue and control flow across lanes,
+- accelerate execution of uniform or convergent predicates.
+
+However, all visibility, masking, and control remain architecturally governed by
+RSV and PMASK.
+
+From the ISA perspective, SIMT execution is indistinguishable from SIMD execution
+with explicit predication.
+
 
 #### 4.2.2 Tiers & Hints (RO, non-binding)
 
