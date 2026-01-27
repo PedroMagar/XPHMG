@@ -32,6 +32,9 @@ All observable behavior - numeric precision, masking, memory residency, coherenc
 * Each domain consumes the same architecturally visible state at instruction boundaries; domain-local mirrors are micro-architectural and MUST NOT diverge in architecturally visible behavior.
 * Cross-domain dataflow is explicit. Ownership, residency, and streaming behavior are described via XMEM classes/domains and, when applicable, `XPHMG_MEMCTL` descriptor tails.
 * No implicit pipeline modes exist; pipelines (e.g., MTX -> RT -> GFX) are expressed by explicit instruction streams and descriptors.
+* Execution parameters, dispatch dimensions, or work descriptors may be sourced from memory-resident data structures. Such data structures may be produced by prior execution phases using RSV and XMEM. XPHMG does not mandate a host-driven or device-driven execution model.
+* Resource access is pointer-based via XMEM. No fixed binding tables, descriptor sets, or register-based resource models are assumed; higher-level binding models, if any, are software-defined and outside the scope of XPHMG.
+* Pipeline configuration, shading modes, and rendering behavior are expressed through software-managed state and data structures. XPHMG does not define fixed pipeline state objects or immutable render states.
 
 ### 1.1.1 Architectural Guarantees & Invariants (Informative)
 

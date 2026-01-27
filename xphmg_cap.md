@@ -164,8 +164,7 @@ NOTE: CAP defines the policy above; the selecting/encoding of `pbank` and any pr
 
 ### 2.4 Predication and SIMT relationship (informative):
 
-XPHMG intentionally separates **predicate state**, **execution width**, and
-**scheduling strategy**.
+XPHMG intentionally separates **predicate state**, **execution width**, and **scheduling strategy**. This separation also supports subgroup-style execution models, where collective control flow and coordination are expressed architecturally via predication and synchronization, independent of the underlying execution strategy.
 
 - `XPHMG_PMASK` defines architectural predicate state.
 - RSV defines how vectors consume predicates.
@@ -178,6 +177,8 @@ As a result, the same program can execute correctly on:
 - hybrid SIMD/SIMT hardware,
 
 without requiring code changes or alternate instruction encodings.
+
+> **Note for implementers:** An implementation may expose SIMT execution internally while presenting a uniform architectural model to software. In such cases, PMASK-driven predication and CAP-defined policies provide the architectural convergence points across lanes.
 
 ### 2.5 Cross-Domain Execution, Masks, Exceptions
 
@@ -233,8 +234,8 @@ To avoid collisions between XPHMG sub-extensions, the vendor CSR window `0x7C0-0
 | Range         | Owner / Block         | Contents                                                    |
 | ------------- | --------------------- | ----------------------------------------------------------- |
 | `0x7C0-0x7CF` | `XPHMG_CAP` (core)    | ID, version, global flags, profiles, features, tiers, hints |
-| `0x7D0-0x7D5` | `XPHMG_CAP.PREC`      | Numeric/precision policy & FP exception CSRs                |
-| `0x7D6-0x7D7` | `XPHMG_CAP.SIMT`      | SIMT/wavefront discovery (RO, non-binding)                  |
+| `0x7D0-0x7D4` | `XPHMG_CAP.PREC`      | Numeric/precision policy & FP exception CSRs                |
+| `0x7D5-0x7D7` | `XPHMG_CAP.SIMT`      | SIMT/wavefront discovery (RO, non-binding)                  |
 | `0x7D8-0x7DF` | `XPHMG_CAP.PREC.CAP`  | Precision/format capability descriptors (see 4.5)           |
 | `0x7E0-0x7EF` | `XPHMG_CAP.XMEM`      | Memory / LDS / streaming / descriptor policy                |
 | `0x7F0-0x7F7` | `XPHMG_CAP.XMEM.SVM`  | Indexed gather/scatter (SVMEM) configuration                |
@@ -311,41 +312,58 @@ These CSRs expose non-binding feature discovery bits for software capability pro
 | `CAP.FEAT0`     | 0x7C5 | RO     | General features (bindless, OOO mem, RT, etc.).                      |
 | `CAP.FEAT1`     | 0x7C6 | RO     | Sync/barrier features, PMU presence.                                 |
 | `CAP.PMASK.CAP` | 0x7C7 | RO     | Predicate-mask discovery (presence, bank count, bank0 ALL-ONES rule).|
-| `CAP.SIMT.CAP`  | 0x7D6 | RO     | SIMT capability discovery (presence + wave width range)              |
-| `CAP.SIMT.LIM`  | 0x7D7 | RO     | Advisory limits (max waves / implementation guidance)                |
 
 **Informative:** Feature bits group optional capabilities; they do not alter architectural behavior without explicit enablement elsewhere.
 
-`CAP.FEAT0` advertises optional capabilities for software tuning. Bits are descriptive, non-binding, and stable after reset unless `RUNTIME_MUTABLE=1` explicitly permits variation. Clearing a bit does not forbid equivalent functionality provided through another mechanism.
+**`CAP.FEAT0`** (RO):
+Advertises general optional architectural features that may influence software structure,
+code generation, or tuning decisions. All bits are descriptive and non-binding; their presence
+does not alter architectural correctness requirements.
 
-**`CAP.SIMT.CAP`** (RO):
-Describes whether the implementation provides SIMT-style execution support.
-
-Suggested fields:
-- `SIMT_PRESENT`: SIMT-style execution supported.
-- `WAVE_MIN`: Minimum supported wavefront width.
-- `WAVE_MAX`: Maximum supported wavefront width.
-
-**`CAP.SIMT.LIM`** (RO):
-Advisory limits and guidance for SIMT scheduling, such as:
-- preferred wave size,
-- maximum concurrent waves per compute unit,
-- implementation-specific occupancy hints.
-
-These values are advisory only and MUST NOT be treated as guarantees.
+Bits in `CAP.FEAT0` describe broad implementation characteristics that are not specific to
+synchronization, performance monitoring, or execution convergence.
 
 Suggested mapping (non-exhaustive):
 
-* `BINDLESS`: Bindless resource access in GFX/RT (see `XPHMG_GFX`).
-* `OOO_MEM`: Out-of-order memory scheduling permitted by XMEM; ordering/visibility still follow fences/scopes.
-* `DYN_REG_ALLOC`: Dynamic VGPR/SGPR allocation in RSV (see `XPHMG_RSV`).
-* `RT_PRESENT`: Ray-tracing pipeline present (see `XPHMG_RT`).
-* `LDS_ATOMICS`: LDS atomics supported in the XMEM/LDS path.
-* `ANISO`: Anisotropic filtering supported by the texture pipeline.
-* `IMG_ATOMICS`: Typed image/buffer atomics supported (see `XPHMG_GFX_IMG`).
-* `SLC_PRESENT`: System-level cache coherence hooks present.
-* `EXT_BARRIERS`: Extended barrier/synchronization primitives implemented (XMEM / RSV sync model).
-* `PMU_PRESENT`: XPHMG-specific performance counters present.
+- `BINDLESS_RESOURCES`:
+  Pointer-based resource access is supported without fixed binding tables or descriptor sets.
+  Resources are addressed via XMEM-defined pointers.
+
+- `OOO_MEMORY`:
+  The implementation may perform out-of-order memory execution internally, while preserving
+  the architectural ordering and visibility rules defined by XPHMG_XMEM.
+
+- `RT_PRESENT`:
+  Ray-tracing–related execution helpers or accelerators are present (see XPHMG_RT).
+
+- `ACCEL_PRESENT`:
+  One or more domain-specific accelerators are present and accessible via XPHMG mechanisms
+  (see XPHMG_ACCEL).
+
+- `MULTI_DOMAIN`:
+  The implementation comprises multiple execution domains (e.g., scalar, vector/SIMD,
+  SIMT, or fixed-function domains) sharing a unified architectural model.
+
+Undefined bits read zero and MUST be ignored by software.
+
+**`CAP.FEAT1`** (RO):
+Advertises optional synchronization, barrier, and monitoring-related features.
+All bits are descriptive and non-binding; their presence does not change the architectural
+semantics of existing instructions or primitives.
+
+Bits in `CAP.FEAT1` describe whether additional synchronization mechanisms or architectural
+monitoring facilities are implemented.
+
+Suggested mapping (non-exhaustive):
+
+- `EXT_BARRIERS`:
+  Extended barrier and synchronization primitives are implemented, as defined by the
+  XPHMG_XMEM and/or XPHMG_RSV synchronization model. These primitives define correctness
+  for workgroup- and subgroup-level coordination.
+
+- `PMU_PRESENT`:
+  XPHMG-specific performance monitoring counters are implemented and accessible via
+  implementation-defined CSRs or mechanisms.
 
 Undefined bits read zero and MUST be ignored by software.
 
@@ -488,13 +506,50 @@ These CSRs hold mandatory numeric policy state that governs all XPHMG domains.
 | `CAP.PREC.STAT`   | 0x7D2 | RO     | Effective state + stickies.                                           |
 | `CAP.PREC.EXC.EN` | 0x7D3 | RW     | FP exception enables: NV,DZ,OF,UF,NX (bits 4:0).                      |
 | `CAP.PREC.EXC.ST` | 0x7D4 | RO/W1C | Sticky flags NV,DZ,OF,UF,NX + QNAN_SEEN,SNAN_SEEN (write 1 to clear). |
-| `CAP.PREC.RSV0`   | 0x7D5 | RO     | Reserved for future precision controls (reads zero).                  |
 
 **Informative:** This block centralizes numeric precision, exception enables, and sticky reporting so that all domains observe consistent policy and error handling.
 
-#### 4.4.2 Numeric Policy Field Definitions
+#### 4.4.2 SIMT CSRs
 
-##### 4.4.2.1 `CAP.PREC.MODE` - Base Precision Control (RW)
+These CSRs hold mandatory numeric policy state that governs all XPHMG domains.
+
+**Normative requirements:**
+1. Access types in Table 4.4.2 MUST be enforced: RW fields are writable; RO fields are read-only; RO/W1C fields clear only the bits written as 1 and ignore 0 writes.
+2. Bits not defined in Table 4.4.2 MUST read as zero and MUST be ignored on write unless the access type is RO, in which case writes follow standard CSR semantics.
+
+| CSR               | Addr  | Access | Description                                             |
+| ----------------- | ----- | ------ | ------------------------------------------------------- |
+| `CAP.SIMT.CAP`    | 0x7D5 | RO     | SIMT capability discovery (presence + wave width range) |
+| `CAP.SIMT.LIM`    | 0x7D6 | RO     | Advisory limits (max waves / implementation guidance)   |
+| `CAP.SIMT.CONV`   | 0x7D7 | RO     | Convergence tracking                                    |
+
+**Informative:** This block centralizes SIMT capabilities.
+
+**`CAP.SIMT.CAP`** (RO):
+Describes whether the implementation provides SIMT-style execution support.
+
+Suggested fields:
+- `SIMT_PRESENT`: SIMT-style execution supported.
+- `WAVE_MIN`: Minimum supported wavefront width.
+- `WAVE_MAX`: Maximum supported wavefront width.
+
+**`CAP.SIMT.LIM`** (RO):
+Advisory limits and guidance for SIMT scheduling, such as:
+- preferred wave size,
+- maximum concurrent waves per compute unit,
+- implementation-specific occupancy hints.
+
+**`CAP.SIMT.CONV`** (RO):
+Discovery of convergence/divergence tracking characteristics for SIMT-style execution. This information may be used by runtimes and toolchains to optimize subgroup-style control flow and select accelerated execution paths when reconvergence assistance is present. `CAP.SIMT.CONV` does not define synchronization or memory-ordering semantics and MUST NOT be used as the correctness basis for barrier or subgroup operations. Correctness of subgroup and workgroup behavior is defined by `XPHMG_RSV`, `XPHMG_PMASK`, and `XPHMG_XMEM`; `SIMT` is an implementation strategy, not an architectural requirement.
+
+Suggested fields (WARL/implementation-defined layout is permitted; software MUST treat unknown bits as zero):
+- `RECONVERGE_PRESENT`: 1 if the implementation provides hardware assistance for reconvergence tracking (e.g., a divergence stack or equivalent mechanism).
+- `STACK_DEPTH`: log2-encoded or direct-encoded maximum divergence stack depth (0 indicates "not specified/unknown").
+- `MASK_COMBINE_HINT`: optional hints about how predicate masks are combined on reconvergence (purely advisory).
+
+#### 4.4.3 Numeric Policy Field Definitions
+
+##### 4.4.3.1 `CAP.PREC.MODE` - Base Precision Control (RW)
 
 **Purpose:** default numeric type/behavior for GFX/ALU, MTX, RT, XMEM.
 
@@ -517,7 +572,7 @@ These CSRs hold mandatory numeric policy state that governs all XPHMG domains.
 | 2      | **SAE**        | One-shot suppress-all-exceptions (sticky only).                              |
 | 1:0    | **RSV**        | Reserved.                                                                    |
 
-##### 4.4.2.2 `CAP.PREC.ALT` - Alternate/Extended Mode (RW)
+##### 4.4.3.2 `CAP.PREC.ALT` - Alternate/Extended Mode (RW)
 
 | Bits   | Name            | Description                                                                 |
 | ------ | --------------- | --------------------------------------------------------------------------- |
@@ -542,7 +597,7 @@ These CSRs hold mandatory numeric policy state that governs all XPHMG domains.
 | INT4      | INT4          | 8  | Two INT4 values per byte; forces `PACK = 1`. |
 | INT2      | INT2          | 8  | Four INT2 values per byte; forces `PACK = 2`. |
 
-##### 4.4.2.3 Composition Rules (Effective State `EFF`)
+##### 4.4.3.3 Composition Rules (Effective State `EFF`)
 
 * If `ALT_EN=0`: `EFF = CAP.PREC.MODE`.
 * If `ALT_EN=1`: merge field-wise:
@@ -558,7 +613,7 @@ These CSRs hold mandatory numeric policy state that governs all XPHMG domains.
 * Implementations MUST recompute `EFF` whenever `APPLY0=1` or `APPLY1=1` is written. Writes without APPLY MAY be staged but are not visible architecturally.
 * After `APPLY0=1` or `APPLY1=1`, implementations MUST latch the effective `IE_MASK` (`CAP.PREC.EXC.EN & ~SAE_effective`) into `CAP.PREC.STAT.IE_MASK` for debug and replay determinism.
 
-##### 4.4.2.4 `CAP.PREC.STAT` - Effective State & Sticky Flags (RO)
+##### 4.4.3.4 `CAP.PREC.STAT` - Effective State & Sticky Flags (RO)
 
 |  Bits | Name               | Description                                                   |
 | ----- | ------------------ | ------------------------------------------------------------- |
@@ -582,7 +637,7 @@ These CSRs hold mandatory numeric policy state that governs all XPHMG domains.
 
 `CAP.PREC.STAT` reflects the effective state after the most recent APPLY write. `UNSUP_FMT`, `SAT_HIT`, and `FTZ_HIT` are sticky until the next APPLY or reset. Reset defaults are `PET=FP16`, `EW=16`, `ACCW=FP32`, `SAT=0`, `ALT_EN=0`.
 
-##### 4.4.2.5 FP Exception Control - trap/SAE precedence
+##### 4.4.3.5 FP Exception Control - trap/SAE precedence
 
 | CSR               | Addr  | Access | Description                                                                  |
 | ----------------- | ----- | ------ | ---------------------------------------------------------------------------- |

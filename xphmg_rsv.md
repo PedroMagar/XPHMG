@@ -15,6 +15,8 @@
 
 `XPHMG_RSV` (RISC-V **Scalar-Vectors**) defines a lightweight **scalar-vector reinterpretation layer** for the RISC-V ISA. Rather than introducing a separate vector register file or a distinct execution model, RSV reuses existing scalar instructions and applies them repeatedly across a programmable register window under explicit control of vector length, stride, and predicate masks (XPHMG_PMASK). RSV is designed as a *structural adaptation* of scalar code, not as a replacement for the standard RISC-V Vector (V) extension; when disabled, all instructions execute with their original scalar semantics and remain fully compatible with unextended RISC-V cores.
 
+RSV vector operations, when executed under a common predication context and synchronized using XPHMG-defined barriers, may also be used to express subgroup-style collective behavior. Such usage does not introduce new architectural semantics and remains valid on pure SIMD implementations.
+
 Unlike classical vector ISAs, RSV does not define its own numeric or memory policy. All precision, rounding, saturation, exception handling, masking semantics, and gather/scatter behavior are **architecturally inherited** from `XPHMG_CAP` and `XPHMG_XMEM`. At each instruction boundary, an RSV engine snapshots the effective `CAP.PREC.*` and `CAP.XMEM.*` state, ensuring consistent behavior across RSV, MTX, RT, GFX, and ACCEL domains.
 
 ### 1.1 Conceptual Model (Informative)
@@ -22,7 +24,8 @@ Unlike classical vector ISAs, RSV does not define its own numeric or memory poli
 * RSV acts as a per-instruction micro-loop: a scalar instruction is reissued for `VL` iterations using base/stride parameters taken from SV CSRs, with predicate gating of lane execution and writeback via XPHMG_PMASK.
 * No additional architectural register file is introduced; RSV iterates over slices of the existing scalar register file according to `SVSRCA/SVSRCB/SVDST` base+stride state.
 * Underlying scalar instruction semantics (ALU, FP, load/store, CSR side effects) are preserved per lane; RSV only replicates the execution across lanes defined by `VL` and strides.
-* When RSV is inactive (`SVSTATE.EN=0`), the instruction stream is executed exactly as defined by the base ISA and other enabled extensions.
+* When inactive (`SVSTATE.EN=0`), RSV introduces no additional architectural effects beyond those defined by the base ISA and enabled extensions.
+* Execution parameters or control data for RSV kernels may, in some implementations, be sourced from memory-resident data structures produced by prior execution phases using RSV and XMEM.
 
 ### 1.2 Architectural Guarantees & Invariants (Informative)
 
@@ -64,7 +67,7 @@ Unlike classical vector ISAs, RSV does not define its own numeric or memory poli
 ### 2.2 Goals
 
 * Enable lightweight vectorization of scalar code sequences with minimal encoding overhead and without duplicating functional units.
-* Preserve binary compatibility: when RSV is disabled, the original scalar instruction semantics are observed.
+* Ensure that when RSV is inactive, scalar instruction semantics are observed without additional architectural side effects.
 * Ensure numeric and memory outcomes match those defined by CAP and XMEM so that data can flow consistently across RSV, MTX, RT, GFX, ACCEL, and scalar domains.
 * Allow incremental hardware adoption by keeping required architectural state limited to the SV CSR block.
 
@@ -576,9 +579,9 @@ Demonstrates broadcast of a scalar operand with FP control override (SAE + zeroi
 
 ```asm
 svsetvl x0, 16          # VL=16
-csrw  0x7C1, x10        # base A (zmm2)
-csrw  0x7C2, x20        # base B (zmm3)
-csrw  0x7C3, x30        # base D (zmm1)
+csrw  SVSRCA, x10       # base A (zmm2)
+csrw  SVSRCB, x20       # base B (zmm3)
+csrw  SVDST, x30        # base D (zmm1)
 svon.fpctl rc=RNE, sae=1, z=1   # one-shot FP override
 svon.one
 fadd.s x30, x10, x20    # broadcast x20, zero masked-off lanes per ZMODE
@@ -591,9 +594,9 @@ Shows predicated FP addition with mask-controlled writeback following CAP.ZMODE.
 ```asm
 # VL = 16, predication via PMASK (pbank_eff), zeroing active
 svsetvl x0, 16
-csrrw  x0, 0x7C1, x10   # base A (zmm2)
-csrrw  x0, 0x7C2, x20   # base B (zmm3)
-csrrw  x0, 0x7C3, x30   # base D (zmm1)
+csrrw  x0, SVSRCA, x10  # base A (zmm2)
+csrrw  x0, SVSRCB, x20  # base B (zmm3)
+csrrw  x0, SVDST, x30   # base D (zmm1)
 svon.fpctl rc=RNE, sae=1, z=1   # one-shot override
 svon.one
 fadd.s x30, x10, x20    # executes 16 lanes, masked-off lanes zeroed
@@ -606,9 +609,9 @@ Illustrates SAE in effect for one FP multiply; traps are suppressed but sticky b
 ```asm
 # Multiply scalar r5 by vector r10..r13, suppress FP exceptions
 svsetvl x0, 4
-csrrw x0, 0x7C1, x10
-csrrw x0, 0x7C2, x5
-csrrw x0, 0x7C3, x10
+csrrw x0, SVSRCA, x10
+csrrw x0, SVSRCB, x5
+csrrw x0, SVDST, x10
 svon.fpctl rc=RTZ, sae=1, z=0
 svon.one
 fmul.s x10, x10, x5
@@ -623,7 +626,7 @@ NOTE: All examples assume CAP/XMEM defaults are configured appropriately (e.g., 
 * Internal micro-loop execution can be pipelined or sequenced; the architectural requirement is to preserve decode-time snapshots of SV and CAP/XMEM state for each RSV-affected instruction.
 * Stride counters and base register arithmetic may wrap modulo the scalar register file width (XLEN/ABI-defined register count); overlapping windows programmed by software are architecturally permitted.
 * Minimal hardware may choose small VL limits (e.g., VL >= 8) and restricted stride sets (e.g., stride in {0,1}); all such limits must still honor the architectural rules for clamping and reporting effective VL via `svsetvl`.
-* Optional features (Predication, Reduction, Saturation) are controlled by SV CSRs; unimplemented CSRs must behave as specified (read-as-ones for masks, read-as-zero/ignore for saturation override).
+* Optional features (Predication, Reduction, Saturation) are controlled by SV CSRs and PMASK; unimplemented optional SV CSRs must behave as specified (read-as-zero/ignore for saturation override).
 * Implementations may cache or shadow SV CSR fields internally for timing; architectural visibility on reads/writes and decode-time sampling must remain consistent with Sections 5-7.
 * Illegal or reserved encodings must trap rather than degrade silently to ensure compliance and debuggability.
 

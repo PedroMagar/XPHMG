@@ -19,6 +19,10 @@ The extension supplies primitives for texture and tensor sampling, interpolation
 
 Mesh-style rendering is a software pattern expressed as RSV kernels that orchestrate MTX/XMEM control flow and data movement. `XPHMG_GFX` provides visibility/culling, stream compaction, sampling/interpolation/shading helpers, and Z/HZ helpers only. It does not define a mesh execution stage, workgroup model, execution width, or scheduling; those responsibilities belong to RSV + PMASK + XMEM.
 
+Informative clarifications:
+- Mesh amplification, task-style, or geometry generation passes are expressed as ordinary RSV kernels. Such kernels may generate work descriptors, stream offsets, or parameters consumed by subsequent kernels. No dedicated "task stage" or "amplification stage" is defined by `XPHMG_GFX`.
+- Primitive identifiers, barycentric coordinates, and related interpolation outputs may be stored in memory for later evaluation. Shading operations may be decoupled from primitive generation and rasterization. This enables deferred, visibility-buffer, or multi-pass rendering patterns without requiring fixed pipeline stages.
+
 All numeric and memory behavior is taken from the effective state of `XPHMG_CAP`. Precision, rounding, saturation, NaN policy, accumulator promotion, masking (ZMODE), and trap enable come from CAP effective state. Memory ordering, coherence domain, class selection, streaming detection, descriptor policy, and SVMEM behavior come from `CAP.XMEM.*` and `CAP.XMEM.SVM*`. Any divergence from CAP/XMEM semantics is non-conforming. Effective predication consumed by GFX MUST be sourced only from `XPHMG_PMASK` as defined in `xphmg.md`; GFX does not define internal mask sources.
 
 Architectural visibility: results of GFX operations, predicate masks (PMASK bank state), and CSR-visible status bits are architectural. Internal caching, interpolation microarchitecture, or internal promotion beyond CAP requirements is allowed only if architecturally visible results and exception signaling remain identical. NOTE: Implementations MAY promote internally for quality provided architectural results and traps/stickies are unchanged.
